@@ -1,25 +1,160 @@
-### 微前端
-  微前端是一种类似于微服务的架构，它将微服务的理念应用于浏览器端，即将 Web 应用由单一的单体应用转变为多个小型前端应用聚合为一的应用，各个前端应用还可以独立开发、独立运行、独立部署。微前端可以有效的解决项目越来越复杂而难以维护的问题。
+<p align="center">
+  <a href="https://micro-zoe.github.io/micro-app/">
+    <img src="https://zeroing.jd.com/micro-app/media/logo.png" alt="logo" width="200"/>
+  </a>
+</p>
 
-### 关于Micro App
-  在`Micro App`之前，业内已经有一些开源的微前端框架，数量不多，比较流行的框架有2个：`single-spa`和`qiankun`。
+<p align="center">
+  <a href="https://www.npmjs.com/package/@micro-zoe/micro-app">
+    <img src="https://img.shields.io/npm/v/@micro-zoe/micro-app.svg" alt="version"/>
+  </a>
+  <a href="https://www.npmjs.com/package/@micro-zoe/micro-app">
+    <img src="https://img.shields.io/npm/dt/@micro-zoe/micro-app.svg" alt="downloads"/>
+  </a>
+  <a href="https://github.com/micro-zoe/micro-app/blob/master/LICENSE">
+    <img src="https://img.shields.io/npm/l/@micro-zoe/micro-app.svg" alt="license"/>
+  </a>
+  <a href="https://gitter.im/microzoe/micro-app">
+    <img src="https://badges.gitter.im/microzoe/micro-app.svg" alt="gitter">
+  </a>
+  <a href="https://travis-ci.com/github/micro-zoe/micro-app">
+    <img src="https://api.travis-ci.com/micro-zoe/micro-app.svg?branch=master" alt="travis"/>
+  </a>
+  <a href="https://coveralls.io/github/micro-zoe/micro-app?branch=master">
+    <img src="https://coveralls.io/repos/github/micro-zoe/micro-app/badge.svg?branch=master" alt="coveralls"/>
+  </a>
+</p>
+
+English｜[简体中文](./README.zh-cn.md)｜[Documentation](https://micro-zoe.github.io/micro-app/)｜[Discussions](https://github.com/micro-zoe/micro-app/discussions)｜[Gitter](https://gitter.im/microzoe/micro-app)
+
+# 📖Introduction
+micro-app is a micro front-end framework launched by JD Retail. It renders based on webcomponent-like and realizes the micro front-end from component thinking, it aiming to reduce the difficulty of getting started and improve work efficiency. 
+
+It is the lowest cost framework for accessing micro front-end, and provides a series of perfect functions such as JS sandbox, style isolation, element isolation, preloading, resource address completion, plugin system, data communication and so on.
+
+micro-app has no restrictions on the front-end framework, and any framework can be used as a base application to embed any type of micro application of the framework.
+
+# How to use
+The micro front end is divided into a base application (also called main application) and a micro application.
+
+Here is a common example: the base application uses the Vue framework, uses history routing, the micro application uses the react framework, and uses hash routing. We list the modifications that need to be made by the base application and the micro application, and introduce the use of micro-app in detail.
+
+## base application
+**1、Install**
+```bash
+yarn add @micro-zoe/micro-app
+```
+
+**2、import at the entrance**
+```js
+// main.js
+import microApp from '@micro-zoe/micro-app'
+
+microApp.start()
+```
+
+**3、Use components in page**
+```html
+<!-- my-page.vue -->
+<template>
+  <!-- 👇 name is the app name, url is the app address -->
+  <micro-app name='my-app' url='http://localhost:3000/'></micro-app>
+</template>
+```
+
+## micro application
+**Set cross-domain support in the headers of webpack-dev-server**
+```js
+devServer: {
+  headers: {
+    'Access-Control-Allow-Origin': '*',
+  },
+},
+```
+
+The above micro front-end rendering is completed, and the effect is as follows:
+
+![image](https://img10.360buyimg.com/imagetools/jfs/t1/188373/14/17696/41854/6111f4a0E532736ba/4b86f4f8e2044519.png)
+
+More detailed configuration can be viewed [Documentation](https://micro-zoe.github.io/micro-app/docs.html#/zh-cn/start).
+
+# 🤝 Contribution
+If you're interested in this project, you're welcome to mention pull request, and also welcome your "Star" ^_^
+
+### development
+1、Clone
+```
+git clone https://github.com/micro-zoe/micro-app.git
+```
+
+2、Install dependencies
+```
+yarn bootstrap
+```
+
+3、Run project
+```
+yarn start
+```
+
+For more commands, see [DEVELOP](https://github.com/micro-zoe/micro-app/blob/master/DEVELOP.md)
+
+# FAQ
+<details>
+
+  <summary>What are the advantages of micro-app?</summary>
+  It is easy to use and low invasive. It only needs to change a small amount of code to access the micro front-end, and provides rich functions at the same time.
+
+</details>
+<details>
+  <summary>How compatible?</summary>
+  The micro-app relies on two newer APIs, CustomElements and Proxy.
+
+  For browsers that do not support CustomElements, they can be compatible by introducing polyfills. For details, please refer to: [webcomponents/polyfills](https://github.com/webcomponents/polyfills/tree/master/packages/custom-elements)。
+
+  However, Proxy is not compatible for the time being, so the micro-app cannot be run on browsers that do not support Proxy.
+
+  Browser compatibility can be viewed: [Can I Use](https://caniuse.com/?search=Proxy)
+
+  The general is as follows:
+  - desktop: Except IE browser, other browsers are basically compatible.
+  - mobile: ios10+、android5+
+</details>
+
+<details>
+  <summary>Must micro applications support cross-domain?</summary>
+  yes!
+
+  If it is a development environment, you can set headers in webpack-dev-server to support cross-domain.
+
+  ```js
+  devServer: {
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+    },
+  }
+  ```
+
+  If it is a production environment, you can support cross-domain through [Configuration nginx](https://segmentfault.com/a/1190000012550346).
+
+</details>
+
+<details>
+  <summary>Does it support vite?</summary>
   
-  `single-spa`是通过监听 url change 事件，在路由变化时匹配到渲染的子应用并进行渲染，这个思路也是目前实现微前端的主流方式。同时`single-spa`要求子应用修改渲染逻辑并暴露出三个方法：`bootstrap`、`mount`、`unmount`，分别对应初始化、渲染和卸载，这也导致子应用需要对入口文件进行修改。因为`qiankun`是基于`single-spa`进行封装，所以这些特点也被`qiankun`继承下来，并且需要对webpack配置进行一些修改。
+  Yes, please see [adapt vite](https://micro-zoe.github.io/micro-app/docs.html#/zh-cn/framework/vite) for details.
+</details>
+
+<details>
+  <summary>Does it support ssr?</summary>
   
-  `Micro App`并没有沿袭`single-spa`的思路，而是借鉴了WebComponent的思想，通过CustomElement结合自定义的ShadowDom，将微前端封装成一个类WebComponent组件，从而实现微前端的组件化渲染。并且由于自定义ShadowDom的隔离特性，`Micro App`不需要像`single-spa`和`qiankun`一样要求子应用修改渲染逻辑并暴露出方法，也不需要修改webpack配置，是目前市面上接入微前端成本最低的方案。
+  Yes, please see [nextjs](https://micro-zoe.github.io/micro-app/docs.html#/zh-cn/framework/nextjs), [nuxtjs](https://micro-zoe.github.io/micro-app/docs.html#/zh-cn/framework/nuxtjs) for details.
+</details>
 
-  ##### 概念图
-  ![image](https://img10.360buyimg.com/imagetools/jfs/t1/168885/23/20790/54203/6084d445E0c9ec00e/d879637b4bb34253.png ':size=750')
+# Contributors
+<a href="https://github.com/micro-zoe/micro-app/graphs/contributors"><img src="https://micro-zoe.com/contributors.svg?height=55&people=13" /></a>
+<!-- opencollective is inaccurate  -->
+<!-- <a href="https://github.com/micro-zoe/micro-app/graphs/contributors"><img src="https://opencollective.com/micro-app/contributors.svg?width=890&button=false" /></a> -->
 
-
-### Micro App的优势
-  #### 1、使用简单
-  我们将所有功能都封装到一个类WebComponent组件中，从而实现在基座应用中嵌入一行代码即可渲染一个微前端应用，是目前实现微前端最简单的方案。
-  
-  同时`Micro App`还提供了`js沙箱`、`样式隔离`、`元素隔离`、`预加载`、`数据通信`、`静态资源补全`等一系列完善的功能。
-
-  #### 2、零依赖
-  `Micro App`没有任何依赖，这赋予它小巧的体积和更高的扩展性。
-
-  #### 3、兼容所有框架
-  为了保证各个业务之间独立开发、独立部署的能力，`Micro App`做了诸多兼容，在任何技术框架中都可以正常运行。
+# License
+[MIT License](https://github.com/micro-zoe/micro-app/blob/master/LICENSE)

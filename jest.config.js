@@ -22,7 +22,7 @@ module.exports = {
     '/node_modules/',
   ],
   testPathIgnorePatterns: [
-    '/examples/',
+    '/dev/',
     '/scripts/',
   ],
   coveragePathIgnorePatterns: [
@@ -35,10 +35,11 @@ module.exports = {
   },
   rootDir: __dirname,
   testMatch: [
-    '<rootDir>/__tests__/**/*.test.[jt]s?(x)'
+    '<rootDir>/src/__tests__/**/*.test.[jt]s?(x)'
   ],
   globals: {
     __DEV__: true,
+    __TEST__: true,
     'ts-jest': {
       tsconfig: {
         target: 'es5',
@@ -46,7 +47,7 @@ module.exports = {
         strictNullChecks: true,
         noUnusedParameters: true,
         experimentalDecorators: true,
-        allowSyntheticDefaultImports: true
+        allowSyntheticDefaultImports: true,
       }
     }
   }

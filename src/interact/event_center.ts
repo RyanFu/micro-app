@@ -1,19 +1,16 @@
-import { formatLogMessage } from '../libs/utils'
-
-type eventInfo = {
-  data: Record<PropertyKey, unknown>,
-  callbacks: Set<CallableFunction>,
-}
+import { CallableFunctionForInteract } from '@micro-app/types'
+import { logError, isFunction, isPlainObject } from '../libs/utils'
 
 export default class EventCenter {
-  eventList = new Map<string, eventInfo>()
+  eventList = new Map<string, {
+    data: Record<PropertyKey, unknown>,
+    callbacks: Set<CallableFunctionForInteract>,
+  }>()
 
-  // 判断名称是否正确
+  // whether the name is legal
   isLegalName (name: string): boolean {
     if (!name) {
-      console.error(
-        formatLogMessage('event-center: Invalid name')
-      )
+      logError('event-center: Invalid name')
       return false
     }
 
@@ -21,17 +18,15 @@ export default class EventCenter {
   }
 
   /**
-   * 绑定监听函数
-   * @param name 事件名称
-   * @param f 绑定函数
-   * @param autoTrigger 在初次绑定监听函数时有缓存数据，是否需要主动触发一次，默认为false
+   * add listener
+   * @param name event name
+   * @param f listener
+   * @param autoTrigger If there is cached data when first bind listener, whether it needs to trigger, default is false
    */
-  on (name: string, f: CallableFunction, autoTrigger = false): void {
+  on (name: string, f: CallableFunctionForInteract, autoTrigger = false): void {
     if (this.isLegalName(name)) {
-      if (typeof f !== 'function') {
-        return console.error(
-          formatLogMessage('event-center: Invalid callback function')
-        )
+      if (!isFunction(f)) {
+        return logError('event-center: Invalid callback function')
       }
 
       let eventInfo = this.eventList.get(name)
@@ -42,7 +37,7 @@ export default class EventCenter {
         }
         this.eventList.set(name, eventInfo)
       } else if (autoTrigger && Object.getOwnPropertyNames(eventInfo.data).length) {
-        // 如果数据池中有数据，绑定时主动触发一次
+        // auto trigger when data not null
         f(eventInfo.data)
       }
 
@@ -50,13 +45,13 @@ export default class EventCenter {
     }
   }
 
-  // 解除绑定，但数据不清空
-  off (name: string, f?: CallableFunction): void {
+  // remove listener, but the data is not cleared
+  off (name: string, f?: CallableFunctionForInteract): void {
     if (this.isLegalName(name)) {
       const eventInfo = this.eventList.get(name)
       if (eventInfo) {
-        if (typeof f === 'function') {
-          eventInfo.callbacks.delete(f)
+        if (isFunction(f)) {
+          eventInfo.callbacks.delete(f!)
         } else {
           eventInfo.callbacks.clear()
         }
@@ -64,17 +59,15 @@ export default class EventCenter {
     }
   }
 
-  // 发送数据
+  // dispatch data
   dispatch (name: string, data: Record<PropertyKey, unknown>): void {
     if (this.isLegalName(name)) {
-      if (toString.call(data) !== '[object Object]') {
-        return console.error(
-          formatLogMessage('event-center: data must be object')
-        )
+      if (!isPlainObject(data)) {
+        return logError('event-center: data must be object')
       }
       let eventInfo = this.eventList.get(name)
       if (eventInfo) {
-        // 当数据不相等时才更新
+        // Update when the data is not equal
         if (eventInfo.data !== data) {
           eventInfo.data = data
           for (const f of eventInfo.callbacks) {
@@ -91,7 +84,7 @@ export default class EventCenter {
     }
   }
 
-  // 获取数据
+  // get data
   getData (name: string): Record<PropertyKey, unknown> | null {
     const eventInfo = this.eventList.get(name)
     return eventInfo?.data ?? null

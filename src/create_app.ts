@@ -4,194 +4,422 @@ import type {
   SandBoxInterface,
   sourceLinkInfo,
   sourceScriptInfo,
+  Func,
 } from '@micro-app/types'
-import extractHtml from './source'
+import { HTMLLoader } from './source/loader/html'
+import { extractSourceDom } from './source/index'
 import { execScripts } from './source/scripts'
-import { appStatus, lifeCycles } from './constants'
+import { appStates, lifeCycles, keepAliveStates } from './constants'
 import SandBox from './sandbox'
-import { defer } from './libs/utils'
-import dispatchLifecyclesEvent, { dispatchUnmountToMicroApp } from './interact/lifecycles_event'
+import {
+  isFunction,
+  cloneContainer,
+  isBoolean,
+  isPromise,
+  logError,
+  getRootContainer,
+} from './libs/utils'
+import dispatchLifecyclesEvent, { dispatchCustomEventToMicroApp } from './interact/lifecycles_event'
+import globalEnv from './libs/global_env'
+import { releasePatchSetAttribute } from './source/patch'
+import { getActiveApps } from './micro_app'
 
-// 微应用实例
+// micro app instances
 export const appInstanceMap = new Map<string, AppInterface>()
 
-// CreateApp构造函数入参
+// params of CreateApp
 export interface CreateAppParam {
   name: string
   url: string
+  ssrUrl?: string
   scopecss: boolean
   useSandbox: boolean
-  macro?: boolean
   inline?: boolean
-  baseurl?: string
+  baseroute?: string
   container?: HTMLElement | ShadowRoot
 }
 
 export default class CreateApp implements AppInterface {
-  private status: string = appStatus.NOT_LOADED
-  private loadSourceLevel: -1|0|1|2 = 0 // level为2，资源加载完成
+  private state: string = appStates.NOT_LOADED
+  private keepAliveState: string | null = null
+  private keepAliveContainer: HTMLElement | null = null
+  private loadSourceLevel: -1|0|1|2 = 0
+  private umdHookMount: Func | null = null
+  private umdHookUnmount: Func | null = null
+  private libraryName: string | null = null
+  umdMode = false
   isPrefetch = false
+  prefetchResolve: (() => void) | null = null
   name: string
   url: string
+  ssrUrl: string
   container: HTMLElement | ShadowRoot | null = null
   inline: boolean
   scopecss: boolean
   useSandbox: boolean
-  macro = false
-  baseurl = ''
+  baseroute = ''
   source: sourceType
   sandBox: SandBoxInterface | null = null
 
-  constructor ({ name, url, container, inline, scopecss, useSandbox, macro, baseurl }: CreateAppParam) {
+  constructor ({
+    name,
+    url,
+    ssrUrl,
+    container,
+    inline,
+    scopecss,
+    useSandbox,
+    baseroute,
+  }: CreateAppParam) {
     this.container = container ?? null
     this.inline = inline ?? false
-    this.baseurl = baseurl ?? ''
-    // 初始化时非必传👆
+    this.baseroute = baseroute ?? ''
+    this.ssrUrl = ssrUrl ?? ''
+    // optional during init👆
     this.name = name
     this.url = url
     this.useSandbox = useSandbox
     this.scopecss = this.useSandbox && scopecss
-    this.macro = macro ?? false
     this.source = {
       links: new Map<string, sourceLinkInfo>(),
       scripts: new Map<string, sourceScriptInfo>(),
     }
     this.loadSourceCode()
-    if (this.useSandbox) {
-      this.sandBox = new SandBox(name, url, this.macro)
-    }
+    this.useSandbox && (this.sandBox = new SandBox(name, url))
   }
 
-  // 加载资源
+  // Load resources
   loadSourceCode (): void {
-    this.status = appStatus.LOADING_SOURCE_CODE
-    extractHtml(this)
+    this.state = appStates.LOADING_SOURCE_CODE
+    HTMLLoader.getInstance().run(this, extractSourceDom)
   }
 
   /**
-   * 资源加载完成，非预加载和卸载时执行mount操作
+   * When resource is loaded, mount app if it is not prefetch or unmount
    */
   onLoad (html: HTMLElement): void {
     if (++this.loadSourceLevel === 2) {
       this.source.html = html
 
-      if (this.isPrefetch || this.status === appStatus.UNMOUNT) return
-
-      this.status = appStatus.LOAD_SOURCE_FINISHED
-
-      this.mount()
+      if (this.isPrefetch) {
+        this.prefetchResolve?.()
+        this.prefetchResolve = null
+      } else if (appStates.UNMOUNT !== this.state) {
+        this.state = appStates.LOAD_SOURCE_FINISHED
+        this.mount()
+      }
     }
   }
 
   /**
-   * 加载html资源出错
+   * Error loading HTML
    * @param e Error
    */
   onLoadError (e: Error): void {
     this.loadSourceLevel = -1
-    if (this.status !== appStatus.UNMOUNT) {
+    if (this.prefetchResolve) {
+      this.prefetchResolve()
+      this.prefetchResolve = null
+    }
+
+    if (appStates.UNMOUNT !== this.state) {
       this.onerror(e)
-      this.status = appStatus.LOAD_SOURCE_ERROR
+      this.state = appStates.LOAD_SOURCE_ERROR
     }
   }
 
   /**
-   * 初始化资源完成后进行渲染
-   * @param container 容器
-   * @param inline 是否使用内联模式
-   * @param baseurl 路由前缀，每个应用的前缀都是不同的，兜底为空字符串
+   * mount app
+   * @param container app container
+   * @param inline js runs in inline mode
+   * @param baseroute route prefix, default is ''
    */
   mount (
     container?: HTMLElement | ShadowRoot,
     inline?: boolean,
-    baseurl?: string,
+    baseroute?: string,
   ): void {
-    if (!this.container && container) {
-      this.container = container
-    }
-
-    if (typeof inline === 'boolean' && inline !== this.inline) {
+    if (isBoolean(inline) && inline !== this.inline) {
       this.inline = inline
     }
 
-    this.baseurl = baseurl ?? this.baseurl
+    this.container = this.container ?? container!
+    this.baseroute = baseroute ?? this.baseroute
 
     if (this.loadSourceLevel !== 2) {
-      this.status = appStatus.LOADING_SOURCE_CODE
+      this.state = appStates.LOADING_SOURCE_CODE
       return
     }
 
     dispatchLifecyclesEvent(
-      this.container as HTMLElement,
+      this.container,
       this.name,
       lifeCycles.BEFOREMOUNT,
     )
 
-    this.status = appStatus.MOUNTING
+    this.state = appStates.MOUNTING
 
-    const cloneHtml = this.source.html!.cloneNode(true)
-    const fragment = document.createDocumentFragment()
-    Array.from(cloneHtml.childNodes).forEach((node: Node) => {
-      fragment.appendChild(node)
-    })
+    cloneContainer(this.source.html as Element, this.container as Element, !this.umdMode)
 
-    this.container!.appendChild(fragment)
-    this.sandBox?.start(this.baseurl)
+    this.sandBox?.start(this.baseroute)
 
-    execScripts(this.source.scripts, this)
+    let umdHookMountResult: any // result of mount function
 
-    if (this.status !== appStatus.UNMOUNT) {
-      this.status = appStatus.MOUNTED
-      defer(() => {
-        if (this.status !== appStatus.UNMOUNT) {
-          dispatchLifecyclesEvent(
-            this.container as HTMLElement,
-            this.name,
-            lifeCycles.MOUNTED,
-          )
+    if (!this.umdMode) {
+      let hasDispatchMountedEvent = false
+      // if all js are executed, param isFinished will be true
+      execScripts(this.source.scripts, this, (isFinished: boolean) => {
+        if (!this.umdMode) {
+          const { mount, unmount } = this.getUmdLibraryHooks()
+          // if mount & unmount is function, the sub app is umd mode
+          if (isFunction(mount) && isFunction(unmount)) {
+            this.umdHookMount = mount as Func
+            this.umdHookUnmount = unmount as Func
+            this.umdMode = true
+            this.sandBox?.recordUmdSnapshot()
+            try {
+              umdHookMountResult = this.umdHookMount()
+            } catch (e) {
+              logError('an error occurred in the mount function \n', this.name, e)
+            }
+          }
+        }
+
+        if (!hasDispatchMountedEvent && (isFinished === true || this.umdMode)) {
+          hasDispatchMountedEvent = true
+          this.handleMounted(umdHookMountResult)
         }
       })
+    } else {
+      this.sandBox?.rebuildUmdSnapshot()
+      try {
+        umdHookMountResult = this.umdHookMount!()
+      } catch (e) {
+        logError('an error occurred in the mount function \n', this.name, e)
+      }
+      this.handleMounted(umdHookMountResult)
     }
   }
 
   /**
-   * 应用卸载
-   * @param destory 是否完全销毁，删除缓存资源
+   * handle for promise umdHookMount
+   * @param umdHookMountResult result of umdHookMount
    */
-  unmount (destory: boolean): void {
-    if (this.status === appStatus.LOAD_SOURCE_ERROR) {
-      destory = true
+  private handleMounted (umdHookMountResult: any): void {
+    if (isPromise(umdHookMountResult)) {
+      umdHookMountResult
+        .then(() => this.dispatchMountedEvent())
+        .catch((e: Error) => this.onerror(e))
+    } else {
+      this.dispatchMountedEvent()
     }
-    this.status = appStatus.UNMOUNT
+  }
+
+  /**
+   * dispatch mounted event when app run finished
+   */
+  private dispatchMountedEvent (): void {
+    if (appStates.UNMOUNT !== this.state) {
+      this.state = appStates.MOUNTED
+      dispatchLifecyclesEvent(
+        this.container!,
+        this.name,
+        lifeCycles.MOUNTED,
+      )
+    }
+  }
+
+  /**
+   * unmount app
+   * @param destroy completely destroy, delete cache resources
+   * @param unmountcb callback of unmount
+   */
+  unmount (destroy: boolean, unmountcb?: CallableFunction): void {
+    if (this.state === appStates.LOAD_SOURCE_ERROR) {
+      destroy = true
+    }
+
+    this.state = appStates.UNMOUNT
+    this.keepAliveState = null
+    this.keepAliveContainer = null
+
+    // result of unmount function
+    let umdHookUnmountResult: any
+    /**
+     * send an unmount event to the micro app or call umd unmount hook
+     * before the sandbox is cleared
+     */
+    if (this.umdHookUnmount) {
+      try {
+        umdHookUnmountResult = this.umdHookUnmount()
+      } catch (e) {
+        logError('an error occurred in the unmount function \n', this.name, e)
+      }
+    }
+
+    // dispatch unmount event to micro app
+    dispatchCustomEventToMicroApp('unmount', this.name)
+
+    this.handleUnmounted(destroy, umdHookUnmountResult, unmountcb)
+  }
+
+  /**
+   * handle for promise umdHookUnmount
+   * @param destroy completely destroy, delete cache resources
+   * @param umdHookUnmountResult result of umdHookUnmount
+   * @param unmountcb callback of unmount
+   */
+  private handleUnmounted (
+    destroy: boolean,
+    umdHookUnmountResult: any,
+    unmountcb?: CallableFunction,
+  ): void {
+    if (isPromise(umdHookUnmountResult)) {
+      umdHookUnmountResult
+        .then(() => this.actionsForUnmount(destroy, unmountcb))
+        .catch(() => this.actionsForUnmount(destroy, unmountcb))
+    } else {
+      this.actionsForUnmount(destroy, unmountcb)
+    }
+  }
+
+  /**
+   * actions for unmount app
+   * @param destroy completely destroy, delete cache resources
+   * @param unmountcb callback of unmount
+   */
+  private actionsForUnmount (destroy: boolean, unmountcb?: CallableFunction): void {
+    if (destroy) {
+      this.actionsForCompletelyDestroy()
+    } else if (this.umdMode && (this.container as Element).childElementCount) {
+      cloneContainer(this.container as Element, this.source.html as Element, false)
+    }
+
+    // this.container maybe contains micro-app element, stop sandbox should exec after cloneContainer
+    this.sandBox?.stop(this.umdMode)
+    if (!getActiveApps().length) {
+      releasePatchSetAttribute()
+    }
+
+    // dispatch unmount event to base app
     dispatchLifecyclesEvent(
-      this.container as HTMLElement,
+      this.container!,
       this.name,
       lifeCycles.UNMOUNT,
     )
-    // 向微应用发送卸载事件，在沙盒清空之前&声明周期执行之后触发
-    dispatchUnmountToMicroApp(this.name)
-    this.sandBox?.stop()
+
+    this.container!.innerHTML = ''
     this.container = null
-    if (destory) {
-      appInstanceMap.delete(this.name)
+
+    unmountcb && unmountcb()
+  }
+
+  // actions for completely destroy
+  actionsForCompletelyDestroy (): void {
+    if (!this.useSandbox && this.umdMode) {
+      delete window[this.libraryName as any]
     }
+    appInstanceMap.delete(this.name)
+  }
+
+  // hidden app when disconnectedCallback called with keep-alive
+  hiddenKeepAliveApp (): void {
+    const oldContainer = this.container
+
+    cloneContainer(
+      this.container as Element,
+      this.keepAliveContainer ? this.keepAliveContainer : (this.keepAliveContainer = document.createElement('div')),
+      false,
+    )
+
+    this.container = this.keepAliveContainer
+
+    this.keepAliveState = keepAliveStates.KEEP_ALIVE_HIDDEN
+
+    // event should dispatch before clone node
+    // dispatch afterhidden event to micro-app
+    dispatchCustomEventToMicroApp('appstate-change', this.name, {
+      appState: 'afterhidden',
+    })
+
+    // dispatch afterhidden event to base app
+    dispatchLifecyclesEvent(
+      oldContainer!,
+      this.name,
+      lifeCycles.AFTERHIDDEN,
+    )
+  }
+
+  // show app when connectedCallback called with keep-alive
+  showKeepAliveApp (container: HTMLElement | ShadowRoot): void {
+    // dispatch beforeshow event to micro-app
+    dispatchCustomEventToMicroApp('appstate-change', this.name, {
+      appState: 'beforeshow',
+    })
+
+    // dispatch beforeshow event to base app
+    dispatchLifecyclesEvent(
+      container,
+      this.name,
+      lifeCycles.BEFORESHOW,
+    )
+
+    cloneContainer(
+      this.container as Element,
+      container as Element,
+      false,
+    )
+
+    this.container = container
+
+    this.keepAliveState = keepAliveStates.KEEP_ALIVE_SHOW
+
+    // dispatch aftershow event to micro-app
+    dispatchCustomEventToMicroApp('appstate-change', this.name, {
+      appState: 'aftershow',
+    })
+
+    // dispatch aftershow event to base app
+    dispatchLifecyclesEvent(
+      this.container,
+      this.name,
+      lifeCycles.AFTERSHOW,
+    )
   }
 
   /**
-   * 阻断应用正常渲染的错误钩子
+   * app rendering error
    * @param e Error
    */
   onerror (e: Error): void {
     dispatchLifecyclesEvent(
-      this.container as HTMLElement,
+      this.container!,
       this.name,
       lifeCycles.ERROR,
       e,
     )
   }
 
-  // 获取应用状态
-  getAppStatus (): string {
-    return this.status
+  // get app state
+  getAppState (): string {
+    return this.state
+  }
+
+  // get keep-alive state
+  getKeepAliveState (): string | null {
+    return this.keepAliveState
+  }
+
+  // get umd library, if it not exist, return empty object
+  private getUmdLibraryHooks (): Record<string, unknown> {
+    // after execScripts, the app maybe unmounted
+    if (appStates.UNMOUNT !== this.state) {
+      const global = (this.sandBox?.proxyWindow ?? globalEnv.rawWindow) as any
+      this.libraryName = getRootContainer(this.container!).getAttribute('library') || `micro-app-${this.name}`
+      // do not use isObject
+      return typeof global[this.libraryName] === 'object' ? global[this.libraryName] : {}
+    }
+
+    return {}
   }
 }

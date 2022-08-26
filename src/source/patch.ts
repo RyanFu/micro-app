@@ -1,57 +1,31 @@
 import type { Func, AppInterface } from '@micro-app/types'
 import { appInstanceMap } from '../create_app'
 import {
-  formatLogMessage,
   CompletionPath,
   getCurrentAppName,
   pureCreateElement,
   setCurrentAppName,
-  rawDocument,
+  logWarn,
+  isPlainObject,
+  isString,
+  isInvalidQuerySelectorKey,
+  isUniqueElement,
+  isFunction,
 } from '../libs/utils'
 import scopedCSS from './scoped_css'
-import { extractLinkFromHtml, foramtDynamicLink } from './links'
-import { extractScriptElement, runScript, runDynamicScript } from './scripts'
+import { extractLinkFromHtml, formatDynamicLink } from './links'
+import { extractScriptElement, runScript, runDynamicRemoteScript, checkExcludeUrl, checkIgnoreUrl } from './scripts'
 import microApp from '../micro_app'
+import globalEnv from '../libs/global_env'
 
-declare global {
-  interface Element {
-    __MICRO_APP_NAME__: string
-    data: any
-  }
-  interface Node {
-    __MICRO_APP_NAME__: string
-  }
-  interface HTMLStyleElement {
-    linkpath: string
-  }
-}
-
-const rawSetAttribute = Element.prototype.setAttribute
-const rawAppendChild = Node.prototype.appendChild
-const rawInsertBefore = Node.prototype.insertBefore
-const rawReplaceChild = Node.prototype.replaceChild
-const rawRemoveChild = Node.prototype.removeChild
-const rawAppend = Element.prototype.append
-const rawPrepend = Element.prototype.prepend
-
-const rawCreateElement = Document.prototype.createElement
-const rawCreateElementNS = Document.prototype.createElementNS
-const rawCreateDocumentFragment = Document.prototype.createDocumentFragment
-const rawQuerySelector = Document.prototype.querySelector
-const rawQuerySelectorAll = Document.prototype.querySelectorAll
-const rawGetElementById = Document.prototype.getElementById
-const rawGetElementsByClassName = Document.prototype.getElementsByClassName
-const rawGetElementsByTagName = Document.prototype.getElementsByTagName
-const rawGetElementsByName = Document.prototype.getElementsByName
-
-// 记录元素与映射元素
+// Record element and map element
 const dynamicElementInMicroAppMap = new WeakMap<Node, Element | Comment>()
 
 /**
- * 处理新建的node，格式化style、link、script标签
- * @param parent 父元素
- * @param child 新增的元素
- * @param app 应用实例
+ * Process the new node and format the style, link and script element
+ * @param parent parent node
+ * @param child new node
+ * @param app app
  */
 function handleNewNode (parent: Node, child: Node, app: AppInterface): Node {
   if (child instanceof HTMLStyleElement) {
@@ -59,73 +33,90 @@ function handleNewNode (parent: Node, child: Node, app: AppInterface): Node {
       const replaceComment = document.createComment('style element with exclude attribute ignored by micro-app')
       dynamicElementInMicroAppMap.set(child, replaceComment)
       return replaceComment
-    } else if (app.scopecss) {
-      return scopedCSS(child, app.name)
+    } else if (app.scopecss && !child.hasAttribute('ignore')) {
+      return scopedCSS(child, app)
     }
     return child
   } else if (child instanceof HTMLLinkElement) {
-    if (child.hasAttribute('exclude')) {
+    if (child.hasAttribute('exclude') || checkExcludeUrl(child.getAttribute('href'), app.name)) {
       const linkReplaceComment = document.createComment('link element with exclude attribute ignored by micro-app')
       dynamicElementInMicroAppMap.set(child, linkReplaceComment)
       return linkReplaceComment
-    } else if (!app.scopecss) {
+    } else if (
+      child.hasAttribute('ignore') ||
+      checkIgnoreUrl(child.getAttribute('href'), app.name) ||
+      (
+        child.href &&
+        isFunction(microApp.excludeAssetFilter) &&
+        microApp.excludeAssetFilter!(child.href)
+      )
+    ) {
       return child
     }
 
-    const { url, info } = extractLinkFromHtml(
+    const { url, info, replaceComment } = extractLinkFromHtml(
       child,
       parent,
       app,
-      null,
       true,
     )
 
     if (url && info) {
       const replaceStyle = pureCreateElement('style')
-      replaceStyle.linkpath = url
-      foramtDynamicLink(url, info, app, child, replaceStyle)
+      replaceStyle.__MICRO_APP_LINK_PATH__ = url
+      formatDynamicLink(url, info, app, child, replaceStyle)
       dynamicElementInMicroAppMap.set(child, replaceStyle)
       return replaceStyle
+    } else if (replaceComment) {
+      dynamicElementInMicroAppMap.set(child, replaceComment)
+      return replaceComment
     }
-    //  else if (replaceComment) {
-    //   dynamicElementInMicroAppMap.set(child, replaceComment)
-    //   return replaceComment
-    // }
+
     return child
   } else if (child instanceof HTMLScriptElement) {
+    if (
+      child.src &&
+      isFunction(microApp.excludeAssetFilter) &&
+      microApp.excludeAssetFilter!(child.src)
+    ) {
+      return child
+    }
+
     const { replaceComment, url, info } = extractScriptElement(
       child,
       parent,
       app,
       true,
-    )
+    ) || {}
 
     if (url && info) {
-      if (info.code) { // 内联script
-        const replaceElement = runScript(url, info.code, app, info.module, true)
+      if (!info.isExternal) { // inline script
+        const replaceElement = runScript(url, app, info, true)
         dynamicElementInMicroAppMap.set(child, replaceElement)
         return replaceElement
-      } else { // 外部script
-        const replaceElement = runDynamicScript(url, info, app, child)
+      } else { // remote script
+        const replaceElement = runDynamicRemoteScript(url, info, app, child)
         dynamicElementInMicroAppMap.set(child, replaceElement)
         return replaceElement
       }
-    } else {
+    } else if (replaceComment) {
       dynamicElementInMicroAppMap.set(child, replaceComment)
       return replaceComment
     }
+
+    return child
   }
 
   return child
 }
 
 /**
- * 针对插入head和body的元素进行处理，其它情况正常执行
- * @param app 实例
- * @param method 原方法
- * @param parent 父元素
- * @param targetChild 经过格式化的目标元素
- * @param passiveChild insertBefore replaceChild的第二个参数
+ * Handle the elements inserted into head and body, and execute normally in other cases
+ * @param app app
+ * @param method raw method
+ * @param parent parent node
+ * @param targetChild target node
+ * @param passiveChild second param of insertBefore and replaceChild
  */
 function invokePrototypeMethod (
   app: AppInterface,
@@ -134,60 +125,71 @@ function invokePrototypeMethod (
   targetChild: Node,
   passiveChild?: Node | null,
 ): any {
+  const container = getContainer(parent, app)
   /**
-   * 如果passiveChild不是子元素，则 insertBefore replaceChild 会有问题，此时降级处理为 appendchild
-   * 类似：document.head.insertBefore(targetChild, document.head.childNodes[0])
+   * If passiveChild is not the child node, insertBefore replaceChild will have a problem, at this time, it will be degraded to appendChild
+   * E.g: document.head.insertBefore(targetChild, document.head.childNodes[0])
    */
-  if (parent instanceof HTMLHeadElement) {
-    const microAppHead = app.container!.querySelector('micro-app-head')!
+  if (container) {
     /**
-     * 1、passiveChild 存在，则必然为 insertBefore 或 replaceChild
-     * 2、removeChild时，targetChild不一定在microAppHead或者head中
+     * 1. If passiveChild exists, it must be insertBefore or replaceChild
+     * 2. When removeChild, targetChild may not be in microAppHead or head
      */
-    if (passiveChild && !microAppHead.contains(passiveChild)) {
-      return rawAppendChild.call(microAppHead, targetChild)
-    } else if (rawMethod === rawRemoveChild && !microAppHead.contains(targetChild)) {
+    if (passiveChild && !container.contains(passiveChild)) {
+      return globalEnv.rawAppendChild.call(container, targetChild)
+    } else if (rawMethod === globalEnv.rawRemoveChild && !container.contains(targetChild)) {
       if (parent.contains(targetChild)) {
         return rawMethod.call(parent, targetChild)
       }
       return targetChild
-    } else if (rawMethod === rawAppend || rawMethod === rawPrepend) {
-      return rawMethod.call(microAppHead, targetChild)
     }
-    return rawMethod.call(microAppHead, targetChild, passiveChild)
-  } else if (parent instanceof HTMLBodyElement) {
-    const microAppBody = app.container!.querySelector('micro-app-body')!
-    if (passiveChild && !microAppBody.contains(passiveChild)) {
-      return rawAppendChild.call(microAppBody, targetChild)
-    } else if (rawMethod === rawRemoveChild && !microAppBody.contains(targetChild)) {
-      if (parent.contains(targetChild)) {
-        return rawMethod.call(parent, targetChild)
-      }
-      return targetChild
-    } else if (rawMethod === rawAppend || rawMethod === rawPrepend) {
-      return rawMethod.call(microAppBody, targetChild)
-    }
-    return rawMethod.call(microAppBody, targetChild, passiveChild)
-  } else if (rawMethod === rawAppend || rawMethod === rawPrepend) {
+
+    return invokeRawMethod(rawMethod, container, targetChild, passiveChild)
+  }
+
+  return invokeRawMethod(rawMethod, parent, targetChild, passiveChild)
+}
+
+function invokeRawMethod (
+  rawMethod: Func,
+  parent: Node,
+  targetChild: Node,
+  passiveChild?: Node | null
+) {
+  if (isPendMethod(rawMethod)) {
     return rawMethod.call(parent, targetChild)
   }
 
   return rawMethod.call(parent, targetChild, passiveChild)
 }
 
-// 获取映射元素
+function isPendMethod (method: CallableFunction) {
+  return method === globalEnv.rawAppend || method === globalEnv.rawPrepend
+}
+
+function getContainer (node: Node, app: AppInterface) {
+  if (node === document.head) {
+    return app?.container?.querySelector('micro-app-head')
+  }
+  if (node === document.body) {
+    return app?.container?.querySelector('micro-app-body')
+  }
+  return null
+}
+
+// Get the map element
 function getMappingNode (node: Node): Node {
   return dynamicElementInMicroAppMap.get(node) ?? node
 }
 
 /**
- * 新增元素通用处理方法
- * @param parent 父元素
- * @param newChild 新增元素
- * @param passiveChild 可能存在的passive元素
- * @param rawMethod 原方法
+ * method of handle new node
+ * @param parent parent node
+ * @param newChild new node
+ * @param passiveChild passive node
+ * @param rawMethod method
  */
-function commonElementHander (
+function commonElementHandler (
   parent: Node,
   newChild: Node,
   passiveChild: Node | null,
@@ -203,18 +205,18 @@ function commonElementHander (
         handleNewNode(parent, newChild, app),
         passiveChild && getMappingNode(passiveChild),
       )
-    } else if (rawMethod === rawAppend || rawMethod === rawPrepend) {
+    } else if (rawMethod === globalEnv.rawAppend || rawMethod === globalEnv.rawPrepend) {
       return rawMethod.call(parent, newChild)
     }
     return rawMethod.call(parent, newChild, passiveChild)
-  } else if (rawMethod === rawAppend || rawMethod === rawPrepend) {
+  } else if (rawMethod === globalEnv.rawAppend || rawMethod === globalEnv.rawPrepend) {
     const appName = getCurrentAppName()
     if (!(newChild instanceof Node) && appName) {
       const app = appInstanceMap.get(appName)
       if (app?.container) {
-        if (parent instanceof HTMLHeadElement) {
+        if (parent === document.head) {
           return rawMethod.call(app.container.querySelector('micro-app-head'), newChild)
-        } else if (parent instanceof HTMLBodyElement) {
+        } else if (parent === document.body) {
           return rawMethod.call(app.container.querySelector('micro-app-body'), newChild)
         }
       }
@@ -226,61 +228,29 @@ function commonElementHander (
 }
 
 /**
- * 重写元素原型链方法
+ * Rewrite element prototype method
  */
 export function patchElementPrototypeMethods (): void {
   patchDocument()
 
-  // 重写setAttribute
-  Element.prototype.setAttribute = function setAttribute (key: string, value: string): void {
-    if (/^micro-app(-\S+)?/i.test(this.tagName) && key === 'data') {
-      if (toString.call(value) === '[object Object]') {
-        const cloneValue: Record<PropertyKey, unknown> = {}
-        Object.getOwnPropertyNames(value).forEach((propertyKey: PropertyKey) => {
-          if (!(typeof propertyKey === 'string' && propertyKey.indexOf('__') === 0)) {
-            // @ts-ignore
-            cloneValue[propertyKey] = value[propertyKey]
-          }
-        })
-        this.data = cloneValue
-      } else if (value !== '[object Object]') {
-        console.warn(
-          formatLogMessage('property data must be an object')
-        )
-      }
-    } else if (
-      (
-        (key === 'src' && /^(img|iframe|script)$/i.test(this.tagName)) ||
-        (key === 'href' && /^(link|a)$/i.test(this.tagName))
-      ) &&
-      this.__MICRO_APP_NAME__ &&
-      appInstanceMap.has(this.__MICRO_APP_NAME__)
-    ) {
-      const app = appInstanceMap.get(this.__MICRO_APP_NAME__)
-      rawSetAttribute.call(this, key, CompletionPath(value, app!.url))
-    } else {
-      rawSetAttribute.call(this, key, value)
-    }
+  // prototype methods of add element👇
+  Element.prototype.appendChild = function appendChild<T extends Node> (newChild: T): T {
+    return commonElementHandler(this, newChild, null, globalEnv.rawAppendChild)
   }
 
-  // 添加元素👇
-  Node.prototype.appendChild = function appendChild<T extends Node> (newChild: T): T {
-    return commonElementHander(this, newChild, null, rawAppendChild)
+  Element.prototype.insertBefore = function insertBefore<T extends Node> (newChild: T, refChild: Node | null): T {
+    return commonElementHandler(this, newChild, refChild, globalEnv.rawInsertBefore)
   }
 
-  Node.prototype.insertBefore = function insertBefore<T extends Node> (newChild: T, refChild: Node | null): T {
-    return commonElementHander(this, newChild, refChild, rawInsertBefore)
-  }
-
-  Node.prototype.replaceChild = function replaceChild<T extends Node> (newChild: Node, oldChild: T): T {
-    return commonElementHander(this, newChild, oldChild, rawReplaceChild)
+  Element.prototype.replaceChild = function replaceChild<T extends Node> (newChild: Node, oldChild: T): T {
+    return commonElementHandler(this, newChild, oldChild, globalEnv.rawReplaceChild)
   }
 
   Element.prototype.append = function append (...nodes: (Node | string)[]): void {
     let i = 0
     const length = nodes.length
     while (i < length) {
-      commonElementHander(this, nodes[i] as Node, null, rawAppend)
+      commonElementHandler(this, nodes[i] as Node, null, globalEnv.rawAppend)
       i++
     }
   }
@@ -288,50 +258,80 @@ export function patchElementPrototypeMethods (): void {
   Element.prototype.prepend = function prepend (...nodes: (Node | string)[]): void {
     let i = nodes.length
     while (i > 0) {
-      commonElementHander(this, nodes[i - 1] as Node, null, rawPrepend)
+      commonElementHandler(this, nodes[i - 1] as Node, null, globalEnv.rawPrepend)
       i--
     }
   }
 
-  // 删除元素👇
-  Node.prototype.removeChild = function removeChild<T extends Node> (oldChild: T): T {
+  // prototype methods of delete element👇
+  Element.prototype.removeChild = function removeChild<T extends Node> (oldChild: T): T {
     if (oldChild?.__MICRO_APP_NAME__) {
       const app = appInstanceMap.get(oldChild.__MICRO_APP_NAME__)
       if (app?.container) {
         return invokePrototypeMethod(
           app,
-          rawRemoveChild,
+          globalEnv.rawRemoveChild,
           this,
           getMappingNode(oldChild),
         )
       }
-      return rawRemoveChild.call(this, oldChild) as T
+      return globalEnv.rawRemoveChild.call(this, oldChild) as T
     }
 
-    return rawRemoveChild.call(this, oldChild) as T
+    return globalEnv.rawRemoveChild.call(this, oldChild) as T
   }
+
+  // patch cloneNode
+  Element.prototype.cloneNode = function cloneNode (deep?: boolean): Node {
+    const clonedNode = globalEnv.rawCloneNode.call(this, deep)
+    this.__MICRO_APP_NAME__ && (clonedNode.__MICRO_APP_NAME__ = this.__MICRO_APP_NAME__)
+    return clonedNode
+  }
+
+  // patch getBoundingClientRect
+  // TODO: scenes test
+  // Element.prototype.getBoundingClientRect = function getBoundingClientRect () {
+  //   const rawRect: DOMRect = globalEnv.rawGetBoundingClientRect.call(this)
+  //   if (this.__MICRO_APP_NAME__) {
+  //     const app = appInstanceMap.get(this.__MICRO_APP_NAME__)
+  //     if (!app?.container) {
+  //       return rawRect
+  //     }
+  //     const appBody = app.container.querySelector('micro-app-body')
+  //     const appBodyRect: DOMRect = globalEnv.rawGetBoundingClientRect.call(appBody)
+  //     const computedRect: DOMRect = new DOMRect(
+  //       rawRect.x - appBodyRect.x,
+  //       rawRect.y - appBodyRect.y,
+  //       rawRect.width,
+  //       rawRect.height,
+  //     )
+  //     return computedRect
+  //   }
+
+  //   return rawRect
+  // }
 }
 
 /**
- * 将微应用中新建的元素打标
- * @param element 新建的元素
+ * Mark the newly created element in the micro application
+ * @param element new element
  */
 function markElement <T extends { __MICRO_APP_NAME__: string }> (element: T): T {
   const appName = getCurrentAppName()
-  if (appName) {
-    element.__MICRO_APP_NAME__ = appName
-  }
+  if (appName) element.__MICRO_APP_NAME__ = appName
   return element
 }
 
-// document相关方法
+// methods of document
 function patchDocument () {
-  // 创建元素👇
+  const rawDocument = globalEnv.rawDocument
+
+  // create element 👇
   Document.prototype.createElement = function createElement (
     tagName: string,
     options?: ElementCreationOptions,
   ): HTMLElement {
-    const element = rawCreateElement.call(rawDocument, tagName, options)
+    const element = globalEnv.rawCreateElement.call(this, tagName, options)
     return markElement(element)
   }
 
@@ -340,28 +340,39 @@ function patchDocument () {
     name: string,
     options?: string | ElementCreationOptions,
   ): any {
-    const element = rawCreateElementNS.call(rawDocument, namespaceURI, name, options)
+    const element = globalEnv.rawCreateElementNS.call(this, namespaceURI, name, options)
     return markElement(element)
   }
 
   Document.prototype.createDocumentFragment = function createDocumentFragment (): DocumentFragment {
-    const element = rawCreateDocumentFragment.call(rawDocument)
+    const element = globalEnv.rawCreateDocumentFragment.call(this)
     return markElement(element)
   }
 
-  // 查询元素👇
-  function querySelector (selectors: string): any {
+  // query element👇
+  function querySelector (this: Document, selectors: string): any {
     const appName = getCurrentAppName()
-    if (!appName || selectors === 'head' || selectors === 'body') {
-      return rawQuerySelector.call(rawDocument, selectors)
+    if (
+      !appName ||
+      !selectors ||
+      isUniqueElement(selectors) ||
+      // see https://github.com/micro-zoe/micro-app/issues/56
+      rawDocument !== this
+    ) {
+      return globalEnv.rawQuerySelector.call(this, selectors)
     }
     return appInstanceMap.get(appName)?.container?.querySelector(selectors) ?? null
   }
 
-  function querySelectorAll (selectors: string): any {
+  function querySelectorAll (this: Document, selectors: string): any {
     const appName = getCurrentAppName()
-    if (!appName || selectors === 'head' || selectors === 'body') {
-      return rawQuerySelectorAll.call(rawDocument, selectors)
+    if (
+      !appName ||
+      !selectors ||
+      isUniqueElement(selectors) ||
+      rawDocument !== this
+    ) {
+      return globalEnv.rawQuerySelectorAll.call(this, selectors)
     }
     return appInstanceMap.get(appName)?.container?.querySelectorAll(selectors) ?? []
   }
@@ -369,78 +380,140 @@ function patchDocument () {
   Document.prototype.querySelector = querySelector
   Document.prototype.querySelectorAll = querySelectorAll
 
-  // querySelector 不支持数字开头
   Document.prototype.getElementById = function getElementById (key: string): HTMLElement | null {
-    const appName = getCurrentAppName()
-    if (!appName || /^\d/.test(key)) {
-      return rawGetElementById.call(rawDocument, key)
+    if (!getCurrentAppName() || isInvalidQuerySelectorKey(key)) {
+      return globalEnv.rawGetElementById.call(this, key)
     }
-    return querySelector(`#${key}`)
+
+    try {
+      return querySelector.call(this, `#${key}`)
+    } catch {
+      return globalEnv.rawGetElementById.call(this, key)
+    }
   }
 
   Document.prototype.getElementsByClassName = function getElementsByClassName (key: string): HTMLCollectionOf<Element> {
-    const appName = getCurrentAppName()
-    if (!appName || /^\d/.test(key)) {
-      return rawGetElementsByClassName.call(rawDocument, key)
+    if (!getCurrentAppName() || isInvalidQuerySelectorKey(key)) {
+      return globalEnv.rawGetElementsByClassName.call(this, key)
     }
-    return querySelectorAll(`.${key}`)
+
+    try {
+      return querySelectorAll.call(this, `.${key}`)
+    } catch {
+      return globalEnv.rawGetElementsByClassName.call(this, key)
+    }
   }
 
   Document.prototype.getElementsByTagName = function getElementsByTagName (key: string): HTMLCollectionOf<Element> {
     const appName = getCurrentAppName()
     if (
       !appName ||
-      /^body$/i.test(key) ||
-      /^head$/i.test(key) ||
+      isUniqueElement(key) ||
+      isInvalidQuerySelectorKey(key) ||
       (!appInstanceMap.get(appName)?.inline && /^script$/i.test(key))
     ) {
-      return rawGetElementsByTagName.call(rawDocument, key)
+      return globalEnv.rawGetElementsByTagName.call(this, key)
     }
-    return querySelectorAll(key)
+
+    try {
+      return querySelectorAll.call(this, key)
+    } catch {
+      return globalEnv.rawGetElementsByTagName.call(this, key)
+    }
   }
 
   Document.prototype.getElementsByName = function getElementsByName (key: string): NodeListOf<HTMLElement> {
-    const appName = getCurrentAppName()
-    if (!appName || /^\d/.test(key)) {
-      return rawGetElementsByName.call(rawDocument, key)
+    if (!getCurrentAppName() || isInvalidQuerySelectorKey(key)) {
+      return globalEnv.rawGetElementsByName.call(this, key)
     }
-    return querySelectorAll(`[name=${key}]`)
+
+    try {
+      return querySelectorAll.call(this, `[name=${key}]`)
+    } catch {
+      return globalEnv.rawGetElementsByName.call(this, key)
+    }
   }
 }
 
-function releasePatchDocument (): void {
-  Document.prototype.createElement = rawCreateElement
-  Document.prototype.createElementNS = rawCreateElementNS
-  Document.prototype.createDocumentFragment = rawCreateDocumentFragment
-  Document.prototype.querySelector = rawQuerySelector
-  Document.prototype.querySelectorAll = rawQuerySelectorAll
-  Document.prototype.getElementById = rawGetElementById
-  Document.prototype.getElementsByClassName = rawGetElementsByClassName
-  Document.prototype.getElementsByTagName = rawGetElementsByTagName
-  Document.prototype.getElementsByName = rawGetElementsByName
+/**
+ * patchSetAttribute is different from other patch
+ * it not dependent on sandbox
+ * it should exec when micro-app first created & release when all app unmounted
+ */
+let hasRewriteSetAttribute = false
+export function patchSetAttribute (): void {
+  if (hasRewriteSetAttribute) return
+  hasRewriteSetAttribute = true
+  Element.prototype.setAttribute = function setAttribute (key: string, value: string): void {
+    if (/^micro-app(-\S+)?/i.test(this.tagName) && key === 'data') {
+      if (isPlainObject(value)) {
+        const cloneValue: Record<PropertyKey, unknown> = {}
+        Object.getOwnPropertyNames(value).forEach((propertyKey: PropertyKey) => {
+          if (!(isString(propertyKey) && propertyKey.indexOf('__') === 0)) {
+            // @ts-ignore
+            cloneValue[propertyKey] = value[propertyKey]
+          }
+        })
+        this.data = cloneValue
+      } else if (value !== '[object Object]') {
+        logWarn('property data must be an object', this.getAttribute('name'))
+      }
+    } else if (
+      (
+        ((key === 'src' || key === 'srcset') && /^(img|script)$/i.test(this.tagName)) ||
+        (key === 'href' && /^link$/i.test(this.tagName))
+      ) &&
+      this.__MICRO_APP_NAME__ &&
+      appInstanceMap.has(this.__MICRO_APP_NAME__)
+    ) {
+      const app = appInstanceMap.get(this.__MICRO_APP_NAME__)
+      globalEnv.rawSetAttribute.call(this, key, CompletionPath(value, app!.url))
+    } else {
+      globalEnv.rawSetAttribute.call(this, key, value)
+    }
+  }
 }
 
-// 解除绑定
+export function releasePatchSetAttribute (): void {
+  hasRewriteSetAttribute = false
+  Element.prototype.setAttribute = globalEnv.rawSetAttribute
+}
+
+function releasePatchDocument (): void {
+  Document.prototype.createElement = globalEnv.rawCreateElement
+  Document.prototype.createElementNS = globalEnv.rawCreateElementNS
+  Document.prototype.createDocumentFragment = globalEnv.rawCreateDocumentFragment
+  Document.prototype.querySelector = globalEnv.rawQuerySelector
+  Document.prototype.querySelectorAll = globalEnv.rawQuerySelectorAll
+  Document.prototype.getElementById = globalEnv.rawGetElementById
+  Document.prototype.getElementsByClassName = globalEnv.rawGetElementsByClassName
+  Document.prototype.getElementsByTagName = globalEnv.rawGetElementsByTagName
+  Document.prototype.getElementsByName = globalEnv.rawGetElementsByName
+}
+
+// release patch
 export function releasePatches (): void {
   setCurrentAppName(null)
   releasePatchDocument()
-  Element.prototype.setAttribute = rawSetAttribute
-  Node.prototype.appendChild = rawAppendChild
-  Node.prototype.insertBefore = rawInsertBefore
-  Node.prototype.replaceChild = rawReplaceChild
-  Node.prototype.removeChild = rawRemoveChild
-  Element.prototype.append = rawAppend
-  Element.prototype.prepend = rawPrepend
+
+  Element.prototype.appendChild = globalEnv.rawAppendChild
+  Element.prototype.insertBefore = globalEnv.rawInsertBefore
+  Element.prototype.replaceChild = globalEnv.rawReplaceChild
+  Element.prototype.removeChild = globalEnv.rawRemoveChild
+  Element.prototype.append = globalEnv.rawAppend
+  Element.prototype.prepend = globalEnv.rawPrepend
+  Element.prototype.cloneNode = globalEnv.rawCloneNode
+  // Element.prototype.getBoundingClientRect = globalEnv.rawGetBoundingClientRect
 }
 
-// 设置micro-app、micro-app-body的样式
+// Set the style of micro-app-head and micro-app-body
 let hasRejectMicroAppStyle = false
 export function rejectMicroAppStyle (): void {
   if (!hasRejectMicroAppStyle) {
     hasRejectMicroAppStyle = true
     const style = pureCreateElement('style')
-    style.setAttribute('type', 'text/css')
+    globalEnv.rawSetAttribute.call(style, 'type', 'text/css')
     style.textContent = `\n${microApp.tagName}, micro-app-body { display: block; } \nmicro-app-head { display: none; }`
-    rawDocument.head.appendChild(style)
+    globalEnv.rawDocument.head.appendChild(style)
   }
 }

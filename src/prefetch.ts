@@ -1,64 +1,106 @@
-import type { prefetchParamList, prefetchParam } from '@micro-app/types'
+import type { prefetchParamList, prefetchParam, globalAssetsType } from '@micro-app/types'
 import CreateApp, { appInstanceMap } from './create_app'
-import { requestIdleCallback, formatURL } from './libs/utils'
+import {
+  requestIdleCallback,
+  formatAppURL,
+  formatAppName,
+  promiseStream,
+  logError,
+  isBrowser,
+  isArray,
+  isPlainObject,
+  isString,
+  isFunction,
+} from './libs/utils'
+import { fetchSource } from './source/fetch'
+import { globalLinks } from './source/links'
+import { globalScripts } from './source/scripts'
 import microApp from './micro_app'
 
-function filterPreFetchTarget<T extends prefetchParam> (apps: T[]): T[] {
-  const validApps: T[] = []
-
-  if (toString.call(apps) === '[object Array]') {
-    apps.forEach((item) => {
-      item.url = formatURL(item.url)
-      if (
-        toString.call(item) === '[object Object]' &&
-        (item.name && typeof item.name === 'string') &&
-        item.url &&
-        !appInstanceMap.has(item.name)
-      ) {
-        validApps.push(item)
-      }
-    })
-  }
-
-  return validApps
-}
-
 /**
- * 预加载
  * preFetch([
  *  {
  *    name: string,
  *    url: string,
- *    disableScopecss: boolean,
- *    disableSandbox: boolean,
- *    macro: boolean,
- *    shadowDOM: boolean,
+ *    disableScopecss?: boolean,
+ *    disableSandbox?: boolean,
  *  },
  *  ...
  * ])
- * 注意：
- *  1、预加载是异步的，在浏览器空闲时才会执行
- *  2、预加载的 disableScopecss、disableSandbox、macro、shadowDOM 和micro-app组件要保持一致，如果冲突，谁先执行则以谁为准
- * @param apps 应用列表
+ * Note:
+ *  1: preFetch is asynchronous and is performed only when the browser is idle
+ *  2: disableScopecss, disableSandbox must be same with micro-app element, if conflict, the one who executes first shall prevail
+ * @param apps micro apps
  */
 export default function preFetch (apps: prefetchParamList): void {
+  if (!isBrowser) {
+    return logError('preFetch is only supported in browser environment')
+  }
   requestIdleCallback(() => {
-    if (typeof apps === 'function') apps = apps()
+    isFunction(apps) && (apps = (apps as Function)())
 
-    filterPreFetchTarget(apps).forEach((item) => {
-      const app = new CreateApp({
-        name: item.name,
-        url: item.url,
-        scopecss: !(
-          (item.disableScopecss ?? microApp.disableScopecss) ||
-          (item.shadowDOM ?? microApp.shadowDOM)
-        ),
-        useSandbox: !(item.disableSandbox ?? microApp.disableSandbox),
-        macro: item.macro ?? microApp.macro,
-      })
+    if (isArray(apps)) {
+      apps.reduce((pre, next) => pre.then(() => preFetchInSerial(next)), Promise.resolve())
+    }
+  })
+}
 
-      app.isPrefetch = true
-      appInstanceMap.set(item.name, app)
+// sequential preload app
+function preFetchInSerial (prefetchApp: prefetchParam): Promise<void> {
+  return new Promise((resolve) => {
+    requestIdleCallback(() => {
+      if (isPlainObject(prefetchApp) && navigator.onLine) {
+        prefetchApp.name = formatAppName(prefetchApp.name)
+        prefetchApp.url = formatAppURL(prefetchApp.url, prefetchApp.name)
+        if (prefetchApp.name && prefetchApp.url && !appInstanceMap.has(prefetchApp.name)) {
+          const app = new CreateApp({
+            name: prefetchApp.name,
+            url: prefetchApp.url,
+            scopecss: !(prefetchApp.disableScopecss ?? microApp.disableScopecss),
+            useSandbox: !(prefetchApp.disableSandbox ?? microApp.disableSandbox),
+          })
+
+          app.isPrefetch = true
+          app.prefetchResolve = resolve
+          appInstanceMap.set(prefetchApp.name, app)
+        } else {
+          resolve()
+        }
+      } else {
+        resolve()
+      }
     })
   })
+}
+
+/**
+ * load global assets into cache
+ * @param assets global assets of js, css
+ */
+export function getGlobalAssets (assets: globalAssetsType): void {
+  if (isPlainObject(assets)) {
+    requestIdleCallback(() => {
+      fetchGlobalResources(assets.js, 'js', globalScripts)
+      fetchGlobalResources(assets.css, 'css', globalLinks)
+    })
+  }
+}
+
+// TODO: requestIdleCallback for every file
+function fetchGlobalResources (resources:string[] | undefined, suffix:string, cache:Map<string, string>) {
+  if (isArray(resources)) {
+    const effectiveResource = resources!.filter((path) => isString(path) && path.includes(`.${suffix}`) && !cache.has(path))
+
+    const fetchResourcePromise = effectiveResource.map((path) => fetchSource(path))
+
+    // fetch resource with stream
+    promiseStream<string>(fetchResourcePromise, (res: {data: string, index: number}) => {
+      const path = effectiveResource[res.index]
+      if (!cache.has(path)) {
+        cache.set(path, res.data)
+      }
+    }, (err: {error: Error, index: number}) => {
+      logError(err)
+    })
+  }
 }

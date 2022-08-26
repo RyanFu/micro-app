@@ -1,29 +1,27 @@
-import { appInstanceMap } from '../create_app'
+import { AppManager } from '../app_manager'
+import { getRootContainer } from '../libs/utils'
 
-function unmountAppInline (): void {
-  appInstanceMap.forEach(app => {
-    let element = app.container
-    if (element) {
-      if (element instanceof ShadowRoot) {
-        element = element.host as HTMLElement
-      }
-      // @ts-ignore
-      element.disconnectedCallback()
-    }
+function unmountNestedApp (): void {
+  releaseUnmountOfNestedApp()
+
+  AppManager.getInstance().getAll().forEach(app => {
+    // @ts-ignore
+    app.container && getRootContainer(app.container).disconnectedCallback()
   })
-  appInstanceMap.clear()
+
+  !window.__MICRO_APP_UMD_MODE__ && AppManager.getInstance().clear()
 }
 
-// 循环内嵌时子应用卸载后辈应用
-export function listenUmountAppInline (): void {
+// if micro-app run in micro application, delete all next generation application when unmount event received
+export function listenUmountOfNestedApp (): void {
   if (window.__MICRO_APP_ENVIRONMENT__) {
-    window.addEventListener('unmount', unmountAppInline, false)
+    window.addEventListener('unmount', unmountNestedApp, false)
   }
 }
 
-// 解除监听
-export function replaseUnmountAppInline (): void {
+// release listener
+export function releaseUnmountOfNestedApp (): void {
   if (window.__MICRO_APP_ENVIRONMENT__) {
-    window.removeEventListener('unmount', unmountAppInline, false)
+    window.removeEventListener('unmount', unmountNestedApp, false)
   }
 }

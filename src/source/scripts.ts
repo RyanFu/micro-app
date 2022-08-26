@@ -1,34 +1,42 @@
+/* eslint-disable node/no-callback-literal */
 import type {
   AppInterface,
   sourceScriptInfo,
   plugins,
+  Func,
 } from '@micro-app/types'
 import { fetchSource } from './fetch'
 import {
   CompletionPath,
   promiseStream,
-  isSupportModuleScript,
-  createNonceStr,
+  createNonceSrc,
   pureCreateElement,
-  rawWindow,
   defer,
+  logError,
+  isUndefined,
+  isPlainObject,
+  isArray,
+  isFunction,
 } from '../libs/utils'
 import {
   dispatchOnLoadEvent,
   dispatchOnErrorEvent,
 } from './load_event'
 import microApp from '../micro_app'
+import globalEnv from '../libs/global_env'
+import { globalKeyToBeCached } from '../constants'
 
-// 全局script，跨应用复用
+type moduleCallBack = Func & { moduleCount?: number, errorCount?: number }
+
+// Global scripts, reuse across apps
 export const globalScripts = new Map<string, string>()
-const supportModuleScript = isSupportModuleScript()
 
 /**
- * 提取script标签
- * @param script script标签
- * @param parent 父级容器
- * @param app 实例
- * @param isDynamic 是否动态插入
+ * Extract script elements
+ * @param script script element
+ * @param parent parent element of script
+ * @param app app
+ * @param isDynamic dynamic insert
  */
 export function extractScriptElement (
   script: HTMLScriptElement,
@@ -38,15 +46,22 @@ export function extractScriptElement (
 ): any {
   let replaceComment: Comment | null = null
   let src: string | null = script.getAttribute('src')
-  if (script.hasAttribute('exclude')) {
-    replaceComment = document.createComment('script element with exclude attribute ignored by micro-app')
+  if (src) {
+    src = CompletionPath(src, app.url)
+  }
+  if (script.hasAttribute('exclude') || checkExcludeUrl(src, app.name)) {
+    replaceComment = document.createComment('script element with exclude attribute removed by micro-app')
   } else if (
-    (supportModuleScript && script.noModule) ||
-    (!supportModuleScript && script.type === 'module')
+    (script.type && !['text/javascript', 'text/ecmascript', 'application/javascript', 'application/ecmascript', 'module', 'systemjs-module', 'systemjs-importmap'].includes(script.type)) ||
+    script.hasAttribute('ignore') || checkIgnoreUrl(src, app.name)
+  ) {
+    return null
+  } else if (
+    (globalEnv.supportModuleScript && script.noModule) ||
+    (!globalEnv.supportModuleScript && script.type === 'module')
   ) {
     replaceComment = document.createComment(`${script.noModule ? 'noModule' : 'module'} script ignored by micro-app`)
-  } else if (src) { // 远程script
-    src = CompletionPath(src, app.url)
+  } else if (src) { // remote script
     const info = {
       code: '',
       isExternal: true,
@@ -62,8 +77,8 @@ export function extractScriptElement (
     } else {
       return { url: src, info }
     }
-  } else if (script.textContent) { // 内联script
-    const nonceStr: string = createNonceStr()
+  } else if (script.textContent) { // inline script
+    const nonceStr: string = createNonceSrc()
     const info = {
       code: script.textContent,
       isExternal: false,
@@ -78,21 +93,64 @@ export function extractScriptElement (
     } else {
       return { url: nonceStr, info }
     }
-  } else {
-    replaceComment = document.createComment('script ignored by micro-app')
+  } else if (!isDynamic) {
+    /**
+     * script with empty src or empty script.textContent remove in static html
+     * & not removed if it created by dynamic
+     */
+    replaceComment = document.createComment('script element removed by micro-app')
   }
 
   if (isDynamic) {
     return { replaceComment }
   } else {
-    return parent.replaceChild(replaceComment, script)
+    return parent.replaceChild(replaceComment!, script)
   }
 }
 
 /**
- * 获取script远程资源
- * @param wrapElement 容器
- * @param app 实例
+ * get assets plugins
+ * @param appName app name
+ */
+export function getAssetsPlugins (appName: string): plugins['global'] {
+  const globalPlugins = microApp.plugins?.global || []
+  const modulePlugins = microApp.plugins?.modules?.[appName] || []
+
+  return [...globalPlugins, ...modulePlugins]
+}
+
+/**
+ * whether the url needs to be excluded
+ * @param url css or js link
+ * @param plugins microApp plugins
+ */
+export function checkExcludeUrl (url: string | null, appName: string): boolean {
+  if (!url) return false
+  const plugins = getAssetsPlugins(appName) || []
+  return plugins.some(plugin => {
+    if (!plugin.excludeChecker) return false
+    return plugin.excludeChecker(url)
+  })
+}
+
+/**
+ * whether the url needs to be ignore
+ * @param url css or js link
+ * @param plugins microApp plugins
+ */
+export function checkIgnoreUrl (url: string | null, appName: string): boolean {
+  if (!url) return false
+  const plugins = getAssetsPlugins(appName) || []
+  return plugins.some(plugin => {
+    if (!plugin.ignoreChecker) return false
+    return plugin.ignoreChecker(url)
+  })
+}
+
+/**
+ *  Get remote resources of script
+ * @param wrapElement htmlDom
+ * @param app app
  */
 export function fetchScriptsFromHtml (
   wrapElement: HTMLElement,
@@ -106,7 +164,7 @@ export function fetchScriptsFromHtml (
       const globalScriptText = globalScripts.get(url)
       if (globalScriptText) {
         info.code = globalScriptText
-      } else if (!info.defer && !info.async) {
+      } else if ((!info.defer && !info.async) || app.isPrefetch) {
         fetchScriptPromise.push(fetchSource(url, app.name))
         fetchScriptPromiseInfo.push([url, info])
       }
@@ -121,7 +179,7 @@ export function fetchScriptsFromHtml (
         res.data,
       )
     }, (err: {error: Error, index: number}) => {
-      console.error('[micro-app]', err)
+      logError(err, app.name)
     }, () => {
       app.onLoad(wrapElement)
     })
@@ -131,10 +189,10 @@ export function fetchScriptsFromHtml (
 }
 
 /**
- * 请求js成功，记录code值
- * @param url script地址
- * @param info 详情
- * @param data 资源内容
+ * fetch js succeeded, record the code value
+ * @param url script address
+ * @param info resource script info
+ * @param data code
  */
 export function fetchScriptSuccess (
   url: string,
@@ -149,92 +207,148 @@ export function fetchScriptSuccess (
 }
 
 /**
- * mount生命周期中执行js
- * @param scriptList html中的script列表
- * @param app 应用实例
+ * Execute js in the mount lifecycle
+ * @param scriptList script list
+ * @param app app
+ * @param initHook callback for umd mode
  */
-export function execScripts (scriptList: Map<string, sourceScriptInfo>, app: AppInterface): void {
+export function execScripts (
+  scriptList: Map<string, sourceScriptInfo>,
+  app: AppInterface,
+  initHook: moduleCallBack,
+): void {
   const scriptListEntries: Array<[string, sourceScriptInfo]> = Array.from(scriptList.entries())
   const deferScriptPromise: Array<Promise<string>|string> = []
   const deferScriptInfo: Array<[string, sourceScriptInfo]> = []
   for (const [url, info] of scriptListEntries) {
     if (!info.isDynamic) {
+      // Notice the second render
       if (info.defer || info.async) {
-        if (info.isExternal) {
+        if (info.isExternal && !info.code) {
           deferScriptPromise.push(fetchSource(url, app.name))
         } else {
           deferScriptPromise.push(info.code)
         }
         deferScriptInfo.push([url, info])
+
+        info.module && (initHook.moduleCount = initHook.moduleCount ? ++initHook.moduleCount : 1)
       } else {
-        runScript(url, info.code, app, info.module, false)
+        runScript(url, app, info, false)
+        initHook(false)
       }
     }
   }
 
   if (deferScriptPromise.length) {
-    Promise.all(deferScriptPromise).then((res: string[]) => {
-      res.forEach((code, index) => {
-        runScript(deferScriptInfo[index][0], code, app, deferScriptInfo[index][1].module, false)
+    promiseStream<string>(deferScriptPromise, (res: {data: string, index: number}) => {
+      const info = deferScriptInfo[res.index][1]
+      info.code = info.code || res.data
+    }, (err: {error: Error, index: number}) => {
+      initHook.errorCount = initHook.errorCount ? ++initHook.errorCount : 1
+      logError(err, app.name)
+    }, () => {
+      deferScriptInfo.forEach(([url, info]) => {
+        if (info.code) {
+          runScript(url, app, info, false, initHook)
+          !info.module && initHook(false)
+        }
       })
-    }).catch((err) => {
-      console.error('[micro-app]', err)
+      initHook(
+        isUndefined(initHook.moduleCount) ||
+        initHook.errorCount === deferScriptPromise.length
+      )
     })
+  } else {
+    initHook(true)
   }
 }
 
 /**
- * 获取动态创建的远程js
- * @param url js地址
- * @param info info
- * @param app 应用
- * @param originScript 原script标签
+ * run code
+ * @param url script address
+ * @param app app
+ * @param info script info
+ * @param isDynamic dynamically created script
+ * @param callback callback of module script
  */
-export function runDynamicScript (
+export function runScript (
+  url: string,
+  app: AppInterface,
+  info: sourceScriptInfo,
+  isDynamic: boolean,
+  callback?: moduleCallBack,
+): any {
+  try {
+    const code = bindScope(url, app, info.code, info)
+    if (app.inline || info.module) {
+      const scriptElement = pureCreateElement('script')
+      runCode2InlineScript(url, code, info.module, scriptElement, callback)
+      if (isDynamic) return scriptElement
+      // TEST IGNORE
+      app.container?.querySelector('micro-app-body')!.appendChild(scriptElement)
+    } else {
+      runCode2Function(code, info)
+      if (isDynamic) return document.createComment('dynamic script extract by micro-app')
+    }
+  } catch (e) {
+    console.error(`[micro-app from runScript] app ${app.name}: `, e)
+  }
+}
+
+/**
+ * Get dynamically created remote script
+ * @param url script address
+ * @param info info
+ * @param app app
+ * @param originScript origin script element
+ */
+export function runDynamicRemoteScript (
   url: string,
   info: sourceScriptInfo,
   app: AppInterface,
   originScript: HTMLScriptElement,
 ): HTMLScriptElement | Comment {
+  const dispatchScriptOnLoadEvent = () => dispatchOnLoadEvent(originScript)
+
+  // url is unique
   if (app.source.scripts.has(url)) {
     const existInfo: sourceScriptInfo = app.source.scripts.get(url)!
-    defer(() => dispatchOnLoadEvent(originScript))
-    return runScript(url, existInfo.code, app, info.module, true)
+    !existInfo.module && defer(dispatchScriptOnLoadEvent)
+    return runScript(url, app, existInfo, true, dispatchScriptOnLoadEvent)
   }
 
   if (globalScripts.has(url)) {
     const code = globalScripts.get(url)!
     info.code = code
     app.source.scripts.set(url, info)
-    defer(() => dispatchOnLoadEvent(originScript))
-    return runScript(url, code, app, info.module, true)
+    !info.module && defer(dispatchScriptOnLoadEvent)
+    return runScript(url, app, info, true, dispatchScriptOnLoadEvent)
   }
 
   let replaceElement: Comment | HTMLScriptElement
-  if (app.inline) {
+  if (app.inline || info.module) {
     replaceElement = pureCreateElement('script')
   } else {
     replaceElement = document.createComment(`dynamic script with src='${url}' extract by micro-app`)
   }
 
-  fetchSource(url, app.name).then((data: string) => {
-    info.code = data
+  fetchSource(url, app.name).then((code: string) => {
+    info.code = code
     app.source.scripts.set(url, info)
-    if (info.isGlobal) globalScripts.set(url, data)
+    info.isGlobal && globalScripts.set(url, code)
     try {
-      data = bindScope(url, data, app)
-      if (app.inline) {
-        if (info.module) (replaceElement as HTMLScriptElement).setAttribute('type', 'module')
-        replaceElement.textContent = data
+      code = bindScope(url, app, code, info)
+      if (app.inline || info.module) {
+        runCode2InlineScript(url, code, info.module, replaceElement as HTMLScriptElement, dispatchScriptOnLoadEvent)
       } else {
-        (0, eval)(data)
+        runCode2Function(code, info)
       }
     } catch (e) {
-      console.error('[micro-app from runDynamicScript]', e, url)
+      console.error(`[micro-app from runDynamicScript] app ${app.name}: `, e, url)
     }
-    dispatchOnLoadEvent(originScript)
+    !info.module && dispatchOnLoadEvent(originScript)
   }).catch((err) => {
-    console.error('[micro-app]', err)
+    logError(err, app.name)
     dispatchOnErrorEvent(originScript)
   })
 
@@ -242,83 +356,95 @@ export function runDynamicScript (
 }
 
 /**
- * 运行代码
- * @param url 文件地址
- * @param code js代码
- * @param app 应用实例
- * @param module 是否是module标签
- * @param isDynamic 动态创建的script标签
+ * common handle for inline script
+ * @param url script address
+ * @param code bound code
+ * @param module type='module' of script
+ * @param scriptElement target script element
+ * @param callback callback of module script
  */
-export function runScript (
+function runCode2InlineScript (
   url: string,
   code: string,
-  app: AppInterface,
   module: boolean,
-  isDynamic: boolean,
-): any {
-  try {
-    code = bindScope(url, code, app)
-    if (app.inline) {
-      const script = pureCreateElement('script')
-      if (module) script.setAttribute('type', 'module')
-      script.textContent = code
-      if (isDynamic) return script
-      app.container?.querySelector('micro-app-body')!.appendChild(script)
-    } else {
-      (0, eval)(code)
-      if (isDynamic) return document.createComment('dynamic script extract by micro-app')
+  scriptElement: HTMLScriptElement,
+  callback?: moduleCallBack,
+): void {
+  if (module) {
+    // module script is async, transform it to a blob for subsequent operations
+    const blob = new Blob([code], { type: 'text/javascript' })
+    scriptElement.src = URL.createObjectURL(blob)
+    scriptElement.setAttribute('type', 'module')
+    if (callback) {
+      callback.moduleCount && callback.moduleCount--
+      scriptElement.onload = callback.bind(scriptElement, callback.moduleCount === 0)
     }
-  } catch (e) {
-    console.error('[micro-app from runScript]', e)
+  } else {
+    scriptElement.textContent = code
+  }
+
+  if (!url.startsWith('inline-')) {
+    scriptElement.setAttribute('data-origin-src', url)
   }
 }
 
+// init & run code2Function
+function runCode2Function (code: string, info: sourceScriptInfo) {
+  if (!info.code2Function) {
+    info.code2Function = new Function(code)
+  }
+  info.code2Function.call(window)
+}
+
 /**
- * 绑定js作用域
- * @param url js地址
- * @param code 代码内容
- * @param app 应用实例
- * @returns string
+ * bind js scope
+ * @param url script address
+ * @param app app
+ * @param code code
+ * @param info source script info
  */
 function bindScope (
   url: string,
-  code: string,
   app: AppInterface,
+  code: string,
+  info: sourceScriptInfo,
 ): string {
-  if (app.sandBox) {
-    if (typeof microApp.plugins === 'object') {
-      code = usePlugins(url, code, app.name, microApp.plugins)
-    }
-    rawWindow.proxyWindow = app.sandBox.proxyWindow
-    return `;(function(window, self){with(window){;${code}\n}}).call(window.proxyWindow, window.proxyWindow, window.proxyWindow);`
+  if (isPlainObject(microApp.plugins)) {
+    code = usePlugins(url, code, app.name, microApp.plugins!, info)
   }
+
+  if (app.sandBox && !info.module) {
+    globalEnv.rawWindow.__MICRO_APP_PROXY_WINDOW__ = app.sandBox.proxyWindow
+    return `;(function(proxyWindow){with(proxyWindow.__MICRO_APP_WINDOW__){(function(${globalKeyToBeCached}){;${code}\n}).call(proxyWindow,${globalKeyToBeCached})}})(window.__MICRO_APP_PROXY_WINDOW__);`
+  }
+
   return code
 }
 
 /**
- * 调用插件处理文件
- * @param url js地址
- * @param code 代码
- * @param appName 应用名称
- * @param plugins 插件列表
- * @returns string
+ * Call the plugin to process the file
+ * @param url script address
+ * @param code code
+ * @param appName app name
+ * @param plugins plugin list
+ * @param info source script info
  */
-function usePlugins (url: string, code: string, appName: string, plugins: plugins): string {
-  if (toString.call(plugins.global) === '[object Array]') {
-    for (const plugin of plugins.global!) {
-      if (typeof plugin === 'object' && typeof plugin.loader === 'function') {
-        code = plugin.loader(code, url, plugin.options)
-      }
-    }
+function usePlugins (url: string, code: string, appName: string, plugins: plugins, info: sourceScriptInfo): string {
+  const newCode = processCode(plugins.global, code, url, info)
+
+  return processCode(plugins.modules?.[appName], newCode, url, info)
+}
+
+function processCode (configs: plugins['global'], code: string, url: string, info: sourceScriptInfo) {
+  if (!isArray(configs)) {
+    return code
   }
 
-  if (toString.call(plugins.modules?.[appName]) === '[object Array]') {
-    for (const plugin of plugins.modules![appName]) {
-      if (typeof plugin === 'object' && typeof plugin.loader === 'function') {
-        code = plugin.loader(code, url, plugin.options)
-      }
+  return configs.reduce((preCode, config) => {
+    if (isPlainObject(config) && isFunction(config.loader)) {
+      return config.loader!(preCode, url, config.options, info)
     }
-  }
 
-  return code
+    return preCode
+  }, code)
 }
