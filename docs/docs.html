@@ -6,8 +6,8 @@
   <meta name="description" content="Description">
   <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
   <link rel="shortcut icon" href="./favicon.ico" />
-  <link rel="stylesheet" href="//unpkg.com/docsify/lib/themes/vue.css">
-  <title>Micro App</title>
+  <link rel="stylesheet" href="./static/vue.css">
+  <title>MicroApp</title>
   <style>
     img[alt="micro-app"] {
       height: 40px;
@@ -36,8 +36,8 @@
   <script>
     window.$docsify = {
       name: 'micro-app',
-      nameLink: '/',
-      logo: '/_media/logo.png',
+      nameLink: '/micro-app/',
+      logo: '/media/logo.png',
       repo: 'https://github.com/micro-zoe/micro-app/',
       coverpage: false, // 封面
       loadSidebar: true, // 侧边栏
@@ -45,27 +45,14 @@
       subMaxLevel: 2, // 默认情况下只会有一层目录，subMaxLevel可以设置多层目录，从二级标题开始取，设置为2说明只会取二级标题
       auto2top: true, // 切换页面后是否自动跳转到页面顶部
       executeScript: true, // 执行文档里的 script 标签里的脚本，只执行第一个 script
-      loadNavbar: true,
       mergeNavbar: true,
       maxLevel: 4,
+      loadNavbar: 'navbar.md',
+      loadSidebar: 'sidebar.md',
       alias: {
-        '/zh-cn/_sidebar.md': '/_sidebar.md',
-        '/zh-cn/_navbar.md': '/_navbar.md',
+        '/zh-cn/sidebar.md': '/sidebar.md',
+        '/zh-cn/navbar.md': '/navbar.md',
       },
-      plugins: [
-        function (hook, vm) {
-          var footer = [
-            // '<hr/>',
-            '<footer style="text-align: center;">',
-            '<span>Micro App &copy; 2021 京东零售-应用业务产品研发部</span>',
-            '</footer>'
-          ].join('')
-
-          hook.afterEach(function (html) {
-            return html + footer
-          })
-        }
-      ],
       copyCode: {
         buttonText : '复制代码',
         successText: '复制成功'
@@ -84,18 +71,18 @@
       },
     }
   </script>
-  <script src="//unpkg.com/docsify/lib/docsify.min.js"></script>
-  <script src="//unpkg.com/docsify/lib/plugins/search.js"></script>
-  <script src="//unpkg.com/docsify-copy-code"></script>
-  <script src="//unpkg.com/docsify-pagination/dist/docsify-pagination.min.js"></script>
-  <script src="//unpkg.com/docsify/lib/plugins/zoom-image.js"></script>
+  <script src="./static/docsify.min.js"></script>
+  <script src="./static/search.js"></script>
+  <script src="./static/docsify-copy-code.min.js"></script>
+  <script src="./static/docsify-pagination.min.js"></script>
+  <script src="./static/zoom-image.js"></script>
   <script>
     ((window.gitter = {}).chat = {}).options = {
-      room: 'zoe-community/zoe-room'
+      room: 'microzoe/micro-app'
     }
   </script>
-  <script src="//sidecar.gitter.im/dist/sidecar.v1.js" async defer></script>
-  <script src="//unpkg.com/docsify-plugin-flexible-alerts"></script>
-  <script src="//cdn.jsdelivr.net/npm/docsify-tabs@1"></script>
+  <script src="./static/sidecar.v1.js" async defer></script>
+  <script src="./static/docsify-plugin-flexible-alerts.min.js"></script>
+  <script src="./static/docsify-tabs.js"></script>
 </body>
 </html>

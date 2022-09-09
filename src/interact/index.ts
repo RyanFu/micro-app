@@ -1,169 +1,308 @@
+import { CallableFunctionForInteract } from '@micro-app/types'
 import EventCenter from './event_center'
 import { appInstanceMap } from '../create_app'
-import { removeDomScope } from '../libs/utils'
+import {
+  removeDomScope,
+  isString,
+  isFunction,
+  isPlainObject,
+  formatAppName,
+  logError,
+  getRootContainer,
+} from '../libs/utils'
 
 const eventCenter = new EventCenter()
 
 /**
- * 格式化事件名称
- * @param appName 应用名称
- * @param fromBaseApp 是否从基座应用发送数据
+ * Format event name
+ * @param appName app.name
+ * @param fromBaseApp is from base app
  */
 function formatEventName (appName: string, fromBaseApp: boolean): string {
-  if (typeof appName !== 'string' || !appName) return ''
+  if (!isString(appName) || !appName) return ''
   return fromBaseApp ? `__from_base_app_${appName}__` : `__from_micro_app_${appName}__`
 }
 
-// 全局数据通信
+// Global data
 class EventCenterForGlobal {
   /**
-   * 添加全局数据监听
-   * @param cb 绑定函数
-   * @param autoTrigger 在初次绑定监听函数时有缓存数据，是否需要主动触发一次，默认为false
+   * add listener of global data
+   * @param cb listener
+   * @param autoTrigger If there is cached data when first bind listener, whether it needs to trigger, default is false
    */
-  addGlobalDataListener (cb: CallableFunction, autoTrigger?: boolean): void {
+  addGlobalDataListener (cb: CallableFunctionForInteract, autoTrigger?: boolean): void {
+    const appName = (this as any).appName
+    // if appName exists, this is in sub app
+    if (appName) {
+      cb.__APP_NAME__ = appName
+      cb.__AUTO_TRIGGER__ = autoTrigger
+    }
     eventCenter.on('global', cb, autoTrigger)
   }
 
   /**
-   * 解除全局数据监听函数
-   * @param cb 绑定函数
+   * remove listener of global data
+   * @param cb listener
    */
-  removeGlobalDataListener (cb: CallableFunction): void {
-    if (typeof cb === 'function') {
-      eventCenter.off('global', cb)
-    }
+  removeGlobalDataListener (cb: CallableFunctionForInteract): void {
+    isFunction(cb) && eventCenter.off('global', cb)
   }
 
   /**
-   * 发送数据
-   * @param data 对象数据
+   * dispatch global data
+   * @param data data
    */
-  setGlobalData (data: Record<PropertyKey, unknown>): void {
-    eventCenter.dispatch('global', data)
+  setGlobalData (
+    data: Record<PropertyKey, unknown>,
+    nextStep?: CallableFunction,
+    force?: boolean,
+  ): void {
+    // clear dom scope before dispatch global data, apply to micro app
+    removeDomScope()
+
+    eventCenter.dispatch(
+      'global',
+      data,
+      (resArr: unknown[]) => isFunction(nextStep) && nextStep(resArr),
+      force,
+    )
+  }
+
+  forceSetGlobalData (
+    data: Record<PropertyKey, unknown>,
+    nextStep?: CallableFunction,
+  ): void {
+    this.setGlobalData(data, nextStep, true)
   }
 
   /**
-   * 清空所有全局数据绑定函数
+   * get global data
+   */
+  getGlobalData (): Record<PropertyKey, unknown> | null {
+    return eventCenter.getData('global')
+  }
+
+  /**
+   * clear global data
+   */
+  clearGlobalData (): void {
+    eventCenter.clearData('global')
+  }
+
+  /**
+   * clear all listener of global data
+   * if appName exists, only the specified functions is cleared
+   * if appName not exists, only clear the base app functions
    */
   clearGlobalDataListener (): void {
-    eventCenter.off('global')
-  }
-}
-
-// 基座应用的数据通信方法集合
-export class EventCenterForBaseApp extends EventCenterForGlobal {
-  /**
-   * 添加数据监听
-   * @param appName 子应用名称
-   * @param cb 绑定函数
-   * @param autoTrigger 在初次绑定监听函数时有缓存数据，是否需要主动触发一次，默认为false
-   */
-  addDataListener (appName: string, cb: CallableFunction, autoTrigger?: boolean): void {
-    eventCenter.on(formatEventName(appName, false), cb, autoTrigger)
-  }
-
-  /**
-   * 解除监听函数
-   * @param appName 子应用名称
-   * @param cb 绑定函数
-   */
-  removeDataListener (appName: string, cb: CallableFunction): void {
-    if (typeof cb === 'function') {
-      eventCenter.off(formatEventName(appName, false), cb)
+    const appName = (this as any).appName
+    const eventInfo = eventCenter.eventList.get('global')
+    if (eventInfo) {
+      for (const cb of eventInfo.callbacks) {
+        if (
+          (appName && appName === cb.__APP_NAME__) ||
+          !(appName || cb.__APP_NAME__)
+        ) {
+          eventInfo.callbacks.delete(cb)
+        }
+      }
     }
   }
+}
+
+// Event center for base app
+export class EventCenterForBaseApp extends EventCenterForGlobal {
+  /**
+   * add listener
+   * @param appName app.name
+   * @param cb listener
+   * @param autoTrigger If there is cached data when first bind listener, whether it needs to trigger, default is false
+   */
+  addDataListener (appName: string, cb: CallableFunction, autoTrigger?: boolean): void {
+    eventCenter.on(formatEventName(formatAppName(appName), false), cb, autoTrigger)
+  }
 
   /**
-   * 主动获取子应用或基座传递的数据
-   * @param appName 子应用名称
-   * @param fromBaseApp 是否获取基座应用发送给子应用的数据，默认false
+   * remove listener
+   * @param appName app.name
+   * @param cb listener
+   */
+  removeDataListener (appName: string, cb: CallableFunction): void {
+    isFunction(cb) && eventCenter.off(formatEventName(formatAppName(appName), false), cb)
+  }
+
+  /**
+   * get data from micro app or base app
+   * @param appName app.name
+   * @param fromBaseApp whether get data from base app, default is false
    */
   getData (appName: string, fromBaseApp = false): Record<PropertyKey, unknown> | null {
-    return eventCenter.getData(formatEventName(appName, fromBaseApp))
+    return eventCenter.getData(formatEventName(formatAppName(appName), fromBaseApp))
   }
 
   /**
-   * 向指定子应用发送数据
-   * @param appName 子应用名称
-   * @param data 对象数据
+   * Dispatch data to the specified micro app
+   * @param appName app.name
+   * @param data data
    */
-  setData (appName: string, data: Record<PropertyKey, unknown>): void {
-    eventCenter.dispatch(formatEventName(appName, true), data)
+  setData (
+    appName: string,
+    data: Record<PropertyKey, unknown>,
+    nextStep?: CallableFunction,
+    force?: boolean,
+  ): void {
+    eventCenter.dispatch(
+      formatEventName(formatAppName(appName), true),
+      data,
+      (resArr: unknown[]) => isFunction(nextStep) && nextStep(resArr),
+      force,
+    )
+  }
+
+  forceSetData (
+    appName: string,
+    data: Record<PropertyKey, unknown>,
+    nextStep?: CallableFunction,
+  ): void {
+    this.setData(appName, data, nextStep, true)
   }
 
   /**
-   * 清空某个应用的监听函数
-   * @param appName 子应用名称
+   * clear data from base app
+   * @param appName app.name
+   * @param fromBaseApp whether clear data from child app, default is true
+   */
+  clearData (appName: string, fromBaseApp = true): void {
+    eventCenter.clearData(formatEventName(formatAppName(appName), fromBaseApp))
+  }
+
+  /**
+   * clear all listener for specified micro app
+   * @param appName app.name
    */
   clearDataListener (appName: string): void {
-    eventCenter.off(formatEventName(appName, false))
+    eventCenter.off(formatEventName(formatAppName(appName), false))
   }
 }
 
-// 子应用的数据通信方法集合
+// Event center for sub app
 export class EventCenterForMicroApp extends EventCenterForGlobal {
   appName: string
+  umdDataListeners?: {
+    global: Set<CallableFunctionForInteract>,
+    normal: Set<CallableFunctionForInteract>,
+  }
+
   constructor (appName: string) {
     super()
-    this.appName = appName
+    this.appName = formatAppName(appName)
+    !this.appName && logError(`Invalid appName ${appName}`)
   }
 
   /**
-   * 监听基座应用发送的数据
-   * @param cb 绑定函数
-   * @param autoTrigger 在初次绑定监听函数时有缓存数据，是否需要主动触发一次，默认为false
+   * add listener, monitor the data sent by the base app
+   * @param cb listener
+   * @param autoTrigger If there is cached data when first bind listener, whether it needs to trigger, default is false
    */
-  addDataListener (cb: CallableFunction, autoTrigger?: boolean): void {
+  addDataListener (cb: CallableFunctionForInteract, autoTrigger?: boolean): void {
+    cb.__AUTO_TRIGGER__ = autoTrigger
     eventCenter.on(formatEventName(this.appName, true), cb, autoTrigger)
   }
 
   /**
-   * 解除监听函数
-   * @param cb 绑定函数
+   * remove listener
+   * @param cb listener
    */
-  removeDataListener (cb: CallableFunction): void {
-    if (typeof cb === 'function') {
-      eventCenter.off(formatEventName(this.appName, true), cb)
-    }
+  removeDataListener (cb: CallableFunctionForInteract): void {
+    isFunction(cb) && eventCenter.off(formatEventName(this.appName, true), cb)
   }
 
   /**
-   * 主动获取来自基座的数据
+   * get data from base app
    */
-  getData (): Record<PropertyKey, unknown> | null {
-    return eventCenter.getData(formatEventName(this.appName, true))
+  getData (fromBaseApp = true): Record<PropertyKey, unknown> | null {
+    return eventCenter.getData(formatEventName(this.appName, fromBaseApp))
   }
 
   /**
-   * 向基座应用发送数据
-   * @param data 对象数据
+   * dispatch data to base app
+   * @param data data
    */
-  dispatch (data: Record<PropertyKey, unknown>): void {
+  dispatch (data: Record<PropertyKey, unknown>, nextStep?: CallableFunction, force?: boolean): void {
     removeDomScope()
 
-    eventCenter.dispatch(formatEventName(this.appName, false), data)
+    eventCenter.dispatch(
+      formatEventName(this.appName, false),
+      data,
+      (resArr: unknown[]) => isFunction(nextStep) && nextStep(resArr),
+      force,
+      () => {
+        const app = appInstanceMap.get(this.appName)
+        if (app?.container && isPlainObject(data)) {
+          const event = new CustomEvent('datachange', {
+            detail: {
+              data: eventCenter.getData(formatEventName(this.appName, false))
+            }
+          })
 
-    const app = appInstanceMap.get(this.appName)
-    if (app?.container && toString.call(data) === '[object Object]') {
-      const event = new CustomEvent('datachange', {
-        detail: {
-          data,
+          getRootContainer(app.container).dispatchEvent(event)
         }
       })
+  }
 
-      let element = app.container
-      if (element instanceof ShadowRoot) {
-        element = element.host as HTMLElement
-      }
-      element.dispatchEvent(event)
-    }
+  forceDispatch (data: Record<PropertyKey, unknown>, nextStep?: CallableFunction): void {
+    this.dispatch(data, nextStep, true)
   }
 
   /**
-   * 清空当前子应用绑定的所有监听函数
+   * clear data from child app
+   * @param fromBaseApp whether clear data from base app, default is false
+   */
+  clearData (fromBaseApp = false): void {
+    eventCenter.clearData(formatEventName(this.appName, fromBaseApp))
+  }
+
+  /**
+   * clear all listeners
    */
   clearDataListener (): void {
     eventCenter.off(formatEventName(this.appName, true))
+  }
+}
+
+/**
+ * Record UMD function before exec umdHookMount
+ * @param microAppEventCenter
+ */
+export function recordDataCenterSnapshot (microAppEventCenter: EventCenterForMicroApp): void {
+  const appName = microAppEventCenter.appName
+  microAppEventCenter.umdDataListeners = { global: new Set(), normal: new Set() }
+
+  const globalEventInfo = eventCenter.eventList.get('global')
+  if (globalEventInfo) {
+    for (const cb of globalEventInfo.callbacks) {
+      if (appName === cb.__APP_NAME__) {
+        microAppEventCenter.umdDataListeners.global.add(cb)
+      }
+    }
+  }
+
+  const subAppEventInfo = eventCenter.eventList.get(formatEventName(appName, true))
+  if (subAppEventInfo) {
+    microAppEventCenter.umdDataListeners.normal = new Set(subAppEventInfo.callbacks)
+  }
+}
+
+/**
+ * Rebind the UMD function of the record before remount
+ * @param microAppEventCenter instance of EventCenterForMicroApp
+ */
+export function rebuildDataCenterSnapshot (microAppEventCenter: EventCenterForMicroApp): void {
+  for (const cb of microAppEventCenter.umdDataListeners!.global) {
+    microAppEventCenter.addGlobalDataListener(cb, cb.__AUTO_TRIGGER__)
+  }
+
+  for (const cb of microAppEventCenter.umdDataListeners!.normal) {
+    microAppEventCenter.addDataListener(cb, cb.__AUTO_TRIGGER__)
   }
 }

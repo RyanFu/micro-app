@@ -1,174 +1,326 @@
-/* eslint-disable no-new-func */
-import type { Func } from '@micro-app/types'
+/* eslint-disable no-new-func, indent, @typescript-eslint/explicit-module-boundary-types */
+import type {
+  Func,
+  LocationQueryObject,
+  LocationQueryValue,
+  MicroLocation,
+  AttrsType,
+  fiberTasks,
+} from '@micro-app/types'
 
-type RequestIdleCallbackOptions = {
-  timeout: number
+export const version = '__MICRO_APP_VERSION__'
+
+// do not use isUndefined
+export const isBrowser = typeof window !== 'undefined'
+
+// do not use isUndefined
+export const globalThis = (typeof global !== 'undefined')
+  ? global
+  : (
+    (typeof window !== 'undefined')
+      ? window
+      : (
+        (typeof self !== 'undefined') ? self : Function('return this')()
+      )
+  )
+
+export const noop = () => {}
+export const noopFalse = () => false
+
+// Array.isArray
+export const isArray = Array.isArray
+// Object.assign
+export const assign = Object.assign
+
+// Object prototype methods
+export const rawDefineProperty = Object.defineProperty
+export const rawDefineProperties = Object.defineProperties
+export const rawHasOwnProperty = Object.prototype.hasOwnProperty
+
+// is Undefined
+export function isUndefined (target: unknown): target is undefined {
+  return target === undefined
 }
 
-type RequestIdleCallbackInfo = {
-  readonly didTimeout: boolean
-  timeRemaining: () => number
+// is Null
+export function isNull (target: unknown): target is null {
+  return target === null
 }
 
-declare global {
-  interface Window {
-    requestIdleCallback (
-      callback: (info: RequestIdleCallbackInfo) => void,
-      opts?: RequestIdleCallbackOptions,
-    ): number
-    _babelPolyfill: boolean
-    proxyWindow: WindowProxy
-    __MICRO_APP_ENVIRONMENT__: boolean
+// is String
+export function isString (target: unknown): target is string {
+  return typeof target === 'string'
+}
+
+// is Boolean
+export function isBoolean (target: unknown): target is boolean {
+  return typeof target === 'boolean'
+}
+
+// is Number
+export function isNumber (target: unknown): target is Number {
+  return typeof target === 'number'
+}
+
+// is function
+export function isFunction (target: unknown): target is Function {
+  return typeof target === 'function'
+}
+
+// is PlainObject
+export function isPlainObject <T = Record<PropertyKey, unknown>> (target: unknown): target is T {
+  return toString.call(target) === '[object Object]'
+}
+
+// is Object
+export function isObject (target: unknown): target is Object {
+  return typeof target === 'object'
+}
+
+// is Promise
+export function isPromise (target: unknown): target is Promise<unknown> {
+  return toString.call(target) === '[object Promise]'
+}
+
+// is bind function
+export function isBoundFunction (target: unknown): boolean {
+  return isFunction(target) && target.name.indexOf('bound ') === 0 && !target.hasOwnProperty('prototype')
+}
+
+// is constructor function
+export function isConstructor (target: unknown): boolean {
+  if (isFunction(target)) {
+    const targetStr = target.toString()
+    return (
+      target.prototype?.constructor === target &&
+      Object.getOwnPropertyNames(target.prototype).length > 1
+    ) ||
+      /^function\s+[A-Z]/.test(targetStr) ||
+      /^class\s+/.test(targetStr)
+  }
+  return false
+}
+
+// is ShadowRoot
+export function isShadowRoot (target: unknown): target is ShadowRoot {
+  return typeof ShadowRoot !== 'undefined' && target instanceof ShadowRoot
+}
+
+export function isURL (target: unknown): target is URL {
+  return target instanceof URL
+}
+
+export function isElement (target: unknown): target is Element {
+  return target instanceof Element
+}
+
+export function isNode (target: unknown): target is Node {
+  return target instanceof Node
+}
+
+// is ProxyDocument
+export function isProxyDocument (target: unknown): target is Document {
+  return toString.call(target) === '[object ProxyDocument]'
+}
+
+/**
+ * format error log
+ * @param msg message
+ * @param appName app name, default is null
+ */
+export function logError (
+  msg: unknown,
+  appName: string | null = null,
+  ...rest: unknown[]
+): void {
+  const appNameTip = appName && isString(appName) ? ` app ${appName}:` : ''
+  if (isString(msg)) {
+    console.error(`[micro-app]${appNameTip} ${msg}`, ...rest)
+  } else {
+    console.error(`[micro-app]${appNameTip}`, msg, ...rest)
   }
 }
 
-export const rawWindow = new Function('return window')()
-export const rawDocument = new Function('return document')()
-export const version = '__VERSION__'
-
 /**
- * 格式化log信息
- * @param msg log信息
+ * format warn log
+ * @param msg message
+ * @param appName app name, default is null
  */
-export function formatLogMessage (msg: string): string {
-  if (typeof msg === 'string') {
-    return `[micro-app] ${msg}`
+export function logWarn (
+  msg: unknown,
+  appName: string | null = null,
+  ...rest: unknown[]
+): void {
+  const appNameTip = appName && isString(appName) ? ` app ${appName}:` : ''
+  if (isString(msg)) {
+    console.warn(`[micro-app]${appNameTip} ${msg}`, ...rest)
+  } else {
+    console.warn(`[micro-app]${appNameTip}`, msg, ...rest)
   }
-
-  return msg
 }
 
 /**
- * 延迟执行
- * @param fn 回调函数
- * @param args 入参
+ * async execution
+ * @param fn callback
+ * @param args params
  */
-export function defer (fn: Func, ...args: any[]): void {
+export function defer (fn: Func, ...args: unknown[]): void {
   Promise.resolve().then(fn.bind(null, ...args))
 }
 
 /**
- * 格式化URL地址
- * @param url 地址
+ * create URL as MicroLocation
  */
-export function formatURL (url: string | null): string {
-  if (typeof url !== 'string' || !url) return ''
+export const createURL = (function (): (path: string | URL, base?: string) => MicroLocation {
+  class Location extends URL {}
+  return (path: string | URL, base?: string): MicroLocation => {
+    return (base ? new Location('' + path, base) : new Location('' + path)) as MicroLocation
+  }
+})()
+
+/**
+ * Add address protocol
+ * @param url address
+ */
+export function addProtocol (url: string): string {
+  return url.startsWith('//') ? `${globalThis.location.protocol}${url}` : url
+}
+
+/**
+ * format URL address
+ * note the scenes:
+ * 1. micro-app -> attributeChangedCallback
+ * 2. preFetch
+ */
+export function formatAppURL (url: string | null, appName: string | null = null): string {
+  if (!isString(url) || !url) return ''
 
   try {
-    const { origin, pathname } = new URL(
-      url.startsWith('//') ? `${location.protocol}${url}` : url
-    )
-    // 如果以.html结尾，则不需要补全 /
-    if (/\.html$/.test(pathname)) {
-      return `${origin}${pathname}`
+    const { origin, pathname, search } = createURL(addProtocol(url))
+    // If it ends with .html/.node/.php/.net/.etc, don’t need to add /
+    if (/\.(\w+)$/.test(pathname)) {
+      return `${origin}${pathname}${search}`
     }
     const fullPath = `${origin}${pathname}/`.replace(/\/\/$/, '/')
-    return /^https?:\/\//.test(fullPath) ? fullPath : ''
+    return /^https?:\/\//.test(fullPath) ? `${fullPath}${search}` : ''
   } catch (e) {
-    console.error('[micro-app]', e)
+    logError(e, appName)
     return ''
   }
 }
 
 /**
- * 获取的地址的有效域名，如 https://xxx/xx/xx.html 格式化为 https://xxx/xx/
+ * format name
+ * note the scenes:
+ * 1. micro-app -> attributeChangedCallback
+ * 2. event_center -> EventCenterForMicroApp -> constructor
+ * 3. event_center -> EventCenterForBaseApp -> all methods
+ * 4. preFetch
+ * 5. plugins
+ * 6. router api (push, replace)
+ */
+export function formatAppName (name: string | null): string {
+  if (!isString(name) || !name) return ''
+  return name.replace(/(^\d+)|([^\w\d-_])/gi, '')
+}
+
+/**
+ * Get valid address, such as https://xxx/xx/xx.html to https://xxx/xx/
  * @param url app.url
  */
 export function getEffectivePath (url: string): string {
-  if (/\.html$/.test(url)) {
-    const pathArr = url.split('/')
+  const { origin, pathname } = createURL(url)
+  if (/\.(\w+)$/.test(pathname)) {
+    const fullPath = `${origin}${pathname}`
+    const pathArr = fullPath.split('/')
     pathArr.pop()
     return pathArr.join('/') + '/'
   }
 
-  return url
+  return `${origin}${pathname}/`.replace(/\/\/$/, '/')
 }
 
 /**
- * 补全静态资源相对地址
- * @param path 静态资源地址
- * @param baseURI 基础地址 -- app.url
+ * Complete address
+ * @param path address
+ * @param baseURI base url(app.url)
  */
 export function CompletionPath (path: string, baseURI: string): string {
-  if (/^((((ht|f)tps?)|file):)?\/\//.test(path)) return path
+  if (
+    !path ||
+    /^((((ht|f)tps?)|file):)?\/\//.test(path) ||
+    /^(data|blob):/.test(path)
+  ) return path
 
-  return new URL(path, getEffectivePath(baseURI)).toString()
+  return createURL(path, getEffectivePath(addProtocol(baseURI))).toString()
 }
 
 /**
- * 获取link资源所在文件夹，用于补全css中的相对地址
- * @param linkpath link地址
+ * Get the folder where the link resource is located,
+ * which is used to complete the relative address in the css
+ * @param linkPath full link address
  */
-export function getLinkFileDir (linkpath: string): string {
-  const pathArr = linkpath.split('/')
+export function getLinkFileDir (linkPath: string): string {
+  const pathArr = linkPath.split('/')
   pathArr.pop()
-  return pathArr.join('/') + '/'
+  return addProtocol(pathArr.join('/') + '/')
 }
 
 /**
- * promise流
- * @param promiseList promise数组，必传
- * @param successsCb 成功回调，必传
- * @param errorCb 失败回调，必传
- * @param finallyCb 结束回调，必传
+ * promise stream
+ * @param promiseList promise list
+ * @param successCb success callback
+ * @param errorCb failed callback
+ * @param finallyCb finally callback
  */
 export function promiseStream <T> (
   promiseList: Array<Promise<T> | T>,
-  successsCb: CallableFunction,
+  successCb: CallableFunction,
   errorCb: CallableFunction,
-  finallyCb: CallableFunction,
+  finallyCb?: CallableFunction,
 ): void {
   let finishedNum = 0
 
   function isFinished () {
-    if (++finishedNum === promiseList.length) finallyCb()
+    if (++finishedNum === promiseList.length && finallyCb) finallyCb()
   }
 
   promiseList.forEach((p, i) => {
-    if (toString.call(p) === '[object Promise]') {
+    if (isPromise(p)) {
       (p as Promise<T>).then((res: T) => {
-        successsCb({
-          data: res,
-          index: i,
-        })
+        successCb({ data: res, index: i })
         isFinished()
       }).catch((err: Error) => {
-        errorCb({
-          error: err,
-          index: i,
-        })
+        errorCb({ error: err, index: i })
         isFinished()
       })
     } else {
-      successsCb({
-        data: p,
-        index: i,
-      })
+      successCb({ data: p, index: i })
       isFinished()
     }
   })
 }
 
-// 检测浏览器是否支持module script
+// Check whether the browser supports module script
 export function isSupportModuleScript (): boolean {
   const s = document.createElement('script')
   return 'noModule' in s
 }
 
-// 创建随机symbol字符串
-export function createNonceStr (): string {
-  return Math.random().toString(36).substr(2, 15)
+// Create a random symbol string
+export function createNonceSrc (): string {
+  return 'inline-' + Math.random().toString(36).substr(2, 15)
 }
 
-// 数组去重
+// Array deduplication
 export function unique (array: any[]): any[] {
-  return array.filter(function (this: Record<PropertyKey, unknown>, item) {
+  return array.filter(function (this: Record<PropertyKey, boolean>, item) {
     return item in this ? false : (this[item] = true)
   }, Object.create(null))
 }
 
 // requestIdleCallback polyfill
-export const requestIdleCallback = window.requestIdleCallback ||
+export const requestIdleCallback = globalThis.requestIdleCallback ||
   function (fn: CallableFunction) {
     const lastTime = Date.now()
     return setTimeout(function () {
@@ -182,38 +334,277 @@ export const requestIdleCallback = window.requestIdleCallback ||
   }
 
 /**
- * 记录当前正在运行的appName
+ * Wrap requestIdleCallback with promise
+ * Exec callback when browser idle
+ */
+export function promiseRequestIdle (callback: CallableFunction): Promise<void> {
+  return new Promise((resolve) => {
+    requestIdleCallback(() => {
+      callback(resolve)
+    })
+  })
+}
+
+/**
+ * Record the currently running app.name
  */
 let currentMicroAppName: string | null = null
 export function setCurrentAppName (appName: string | null): void {
   currentMicroAppName = appName
 }
 
-// 获取当前运行的应用名称
+export function throttleDeferForSetAppName (appName: string) {
+  if (currentMicroAppName !== appName) {
+    setCurrentAppName(appName)
+    defer(() => {
+      setCurrentAppName(null)
+    })
+  }
+}
+
+// get the currently running app.name
 export function getCurrentAppName (): string | null {
   return currentMicroAppName
 }
 
-// 清除appName绑定
+// Clear appName
 export function removeDomScope (): void {
   setCurrentAppName(null)
 }
 
-// 是否是safari浏览器
+// is safari browser
 export function isSafari (): boolean {
   return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent)
 }
 
-// 是否是函数类型
-export function isFunction (target: unknown): boolean {
-  return typeof target === 'function'
+/**
+ * Create pure elements
+ */
+export function pureCreateElement<K extends keyof HTMLElementTagNameMap> (tagName: K, options?: ElementCreationOptions): HTMLElementTagNameMap[K] {
+  const element = document.createElement(tagName, options)
+  if (element.__MICRO_APP_NAME__) delete element.__MICRO_APP_NAME__
+  element.__PURE_ELEMENT__ = true
+  return element
 }
 
 /**
- * 创建纯净的无绑定的元素
+ * clone origin elements to target
+ * @param origin Cloned element
+ * @param target Accept cloned elements
+ * @param deep deep clone or transfer dom
  */
-export function pureCreateElement<K extends keyof HTMLElementTagNameMap> (tagName: K, options?: ElementCreationOptions): HTMLElementTagNameMap[K] {
-  const element = rawDocument.createElement(tagName, options)
-  if (element.__MICRO_APP_NAME__) delete element.__MICRO_APP_NAME__
-  return element
+export function cloneContainer <T extends Element, Q extends Element> (
+  origin: T,
+  target: Q,
+  deep: boolean,
+): void {
+  target.innerHTML = ''
+  if (deep) {
+    const clonedNode = origin.cloneNode(true)
+    const fragment = document.createDocumentFragment()
+    Array.from(clonedNode.childNodes).forEach((node: Node | Element) => {
+      fragment.appendChild(node)
+    })
+    target.appendChild(fragment)
+  } else {
+    Array.from(origin.childNodes).forEach((node: Node | Element) => {
+      target.appendChild(node)
+    })
+  }
+}
+
+// is invalid key of querySelector
+export function isInvalidQuerySelectorKey (key: string): boolean {
+  if (__TEST__) return !key || /(^\d)|([^\w\d-_$])/gi.test(key)
+  return !key || /(^\d)|([^\w\d-_\u4e00-\u9fa5])/gi.test(key)
+}
+
+// unique element
+export function isUniqueElement (key: string): boolean {
+  return (
+    /^body$/i.test(key) ||
+    /^head$/i.test(key) ||
+    /^html$/i.test(key) ||
+    /^title$/i.test(key)
+  )
+}
+
+/**
+ * get micro-app element
+ * @param target app container
+ */
+export function getRootContainer (target: HTMLElement | ShadowRoot): HTMLElement {
+  return (isShadowRoot(target) ? (target as ShadowRoot).host : target) as HTMLElement
+}
+
+/**
+ * trim start & end
+ */
+export function trim (str: string): string {
+  return str ? str.replace(/^\s+|\s+$/g, '') : ''
+}
+
+export function isFireFox (): boolean {
+  return navigator.userAgent.indexOf('Firefox') > -1
+}
+
+/**
+ * Transforms a queryString into object.
+ * @param search - search string to parse
+ * @returns a query object
+ */
+export function parseQuery (search: string): LocationQueryObject {
+  const result: LocationQueryObject = {}
+  const queryList = search.split('&')
+
+  // we will not decode the key/value to ensure that the values are consistent when update URL
+  for (const queryItem of queryList) {
+    const eqPos = queryItem.indexOf('=')
+    const key = eqPos < 0 ? queryItem : queryItem.slice(0, eqPos)
+    const value = eqPos < 0 ? null : queryItem.slice(eqPos + 1)
+
+    if (key in result) {
+      let currentValue = result[key]
+      if (!isArray(currentValue)) {
+        currentValue = result[key] = [currentValue]
+      }
+      currentValue.push(value)
+    } else {
+      result[key] = value
+    }
+  }
+
+  return result
+}
+
+/**
+ * Transforms an object to query string
+ * @param queryObject - query object to stringify
+ * @returns query string without the leading `?`
+ */
+export function stringifyQuery (queryObject: LocationQueryObject): string {
+  let result = ''
+
+  for (const key in queryObject) {
+    const value = queryObject[key]
+    if (isNull(value)) {
+      result += (result.length ? '&' : '') + key
+    } else {
+      const valueList: LocationQueryValue[] = isArray(value) ? value : [value]
+
+      valueList.forEach(value => {
+        if (!isUndefined(value)) {
+          result += (result.length ? '&' : '') + key
+          if (!isNull(value)) result += '=' + value
+        }
+      })
+    }
+  }
+
+  return result
+}
+
+/**
+ * Register or unregister callback/guard with Set
+ */
+export function useSetRecord<T> () {
+  const handlers: Set<T> = new Set()
+
+  function add (handler: T): () => boolean {
+    handlers.add(handler)
+    return (): boolean => {
+      if (handlers.has(handler)) return handlers.delete(handler)
+      return false
+    }
+  }
+
+  return {
+    add,
+    list: () => handlers,
+  }
+}
+
+/**
+ * record data with Map
+ */
+export function useMapRecord<T> () {
+  const data: Map<PropertyKey, T> = new Map()
+
+  function add (key: PropertyKey, value: T): () => boolean {
+    data.set(key, value)
+    return (): boolean => {
+      if (data.has(key)) return data.delete(key)
+      return false
+    }
+  }
+
+  return {
+    add,
+    get: (key: PropertyKey) => data.get(key),
+    delete: (key: PropertyKey): boolean => {
+      if (data.has(key)) return data.delete(key)
+      return false
+    }
+  }
+}
+
+export function getAttributes (element: Element): AttrsType {
+  const attr = element.attributes
+  const attrMap: AttrsType = new Map()
+  for (let i = 0; i < attr.length; i++) {
+    attrMap.set(attr[i].name, attr[i].value)
+  }
+  return attrMap
+}
+
+/**
+ * if fiberTasks exist, wrap callback with promiseRequestIdle
+ * if not, execute callback
+ * @param fiberTasks fiber task list
+ * @param callback action callback
+ */
+export function injectFiberTask (fiberTasks: fiberTasks, callback: CallableFunction): void {
+  if (fiberTasks) {
+    fiberTasks.push(() => promiseRequestIdle((resolve: PromiseConstructor['resolve']) => {
+      callback()
+      resolve()
+    }))
+  } else {
+    callback()
+  }
+}
+
+/**
+ * serial exec fiber task of link, style, script
+ * @param tasks task array or null
+ */
+export function serialExecFiberTasks (tasks: fiberTasks): Promise<void> | null {
+  return tasks?.reduce((pre, next) => pre.then(next), Promise.resolve()) || null
+}
+
+/**
+ * inline script start with inline-xxx
+ * @param address source address
+ */
+export function isInlineScript (address: string): boolean {
+  return address.startsWith('inline-')
+}
+
+/**
+ * call function with try catch
+ * @param fn target function
+ * @param appName app.name
+ * @param args arguments
+ */
+export function callFnWithTryCatch (
+  fn: Func | null,
+  appName: string,
+  msgSuffix: string,
+  ...args: unknown[]
+): void {
+  try {
+    isFunction(fn) && fn(...args)
+  } catch (e) {
+    logError(`an error occurred in app ${appName} ${msgSuffix} \n`, null, e)
+  }
 }

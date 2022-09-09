@@ -1,167 +1,501 @@
 declare module '@micro-app/types' {
   type AttrType = string | null
 
+  type NormalKey = string | number
+
   type Func = (...rest: any[]) => void
 
-  type microWindowType = Window & any
+  type microAppWindowType = Window & any
+
+  type AppName = string
+
+  type SourceAddress = string
+
+  type AttrsType = Map<string, string>
+
+  type RequestIdleCallbackOptions = {
+    timeout: number
+  }
+
+  type RequestIdleCallbackInfo = {
+    readonly didTimeout: boolean
+    timeRemaining: () => number
+  }
+
+  type fiberTasks = Array<() => Promise<void>> | null
+
+  interface EffectController {
+    recordEffect(): void
+    rebuildEffect(): void
+    releaseEffect(): void
+  }
+
+  interface SandBoxStartParams {
+    umdMode: boolean
+    baseroute: string
+    useMemoryRouter: boolean
+    defaultPage: string
+    disablePatchRequest: boolean
+  }
+
+  interface SandBoxStopParams {
+    umdMode: boolean
+    keepRouteState: boolean
+    clearEventSource: boolean
+    clearData: boolean
+  }
 
   interface SandBoxInterface {
-    active: boolean // 沙箱状态
     proxyWindow: WindowProxy
-    releaseEffect: CallableFunction
-    // 强隔离的全局变量(只能在沙箱中获取和设置的属性，不会兜底到外层window)
-    scopeProperties: Array<PropertyKey>
-    // 可以泄漏到外部window的全局变量
-    escapeProperties: Array<PropertyKey>
-    microWindow: Window // 代理原型
-    injectedKeys: Set<PropertyKey>// proxyWindow新添加的属性
-    escapeKeys: Set<PropertyKey>// 泄漏到外部window的变量，卸载时清除
-    start(baseurl: string): void
-    stop(): void
-    inject(microWindow: microWindowType, appName: string, url: string): void
+    microAppWindow: Window // Proxy target
+    start (startParams: SandBoxStartParams): void
+    stop (stopParams: SandBoxStopParams): void
+    releaseGlobalEffect (clearData?: boolean): void
+    // record umd snapshot before the first execution of umdHookMount
+    recordEffectSnapshot (): void
+    // rebuild umd snapshot before remount umd app
+    rebuildEffectSnapshot (): void
+    setRouteInfoForKeepAliveApp (): void
+    removeRouteInfoForKeepAliveApp (): void
+    setPreRenderState (state: boolean): void
+  }
+
+  interface SandBoxAdapter {
+    // Variables that can only assigned to rawWindow
+    escapeSetterKeyList: PropertyKey[]
+
+    // Variables that can escape to rawWindow
+    staticEscapeProperties: PropertyKey[]
+
+    // Variables that scoped in child app
+    staticScopeProperties: PropertyKey[]
+
+    // adapter for react
+    // injectReactHRMProperty (): void
+  }
+
+  type LinkSourceInfo = {
+    code: string, // source code
+    appSpace: Record<string, {
+      attrs: Map<string, string>, // active element.attributes
+      placeholder?: Comment | null, // placeholder comment
+      parsedCode?: string, // parsed code
+      prefix?: string, // micro-app[name=appName]
+    }>
+  }
+
+  type ScriptSourceInfo = {
+    code: string, // source code
+    isExternal: boolean, // external script
+    appSpace: Record<string, {
+      async: boolean, // async script
+      defer: boolean, // defer script
+      module: boolean, // module type script
+      inline: boolean, // run js with inline script
+      pure: boolean, // pure script
+      attrs: Map<string, string>, // element attributes
+      parsedCode?: string, // bind code
+      parsedFunction?: Function | null, // code to function
+      wrapInSandBox?: boolean // use sandbox
+    }>
+  }
+
+  type sourceType = {
+    html: HTMLElement | null, // html address
+    links: Set<string>, // style/link address list
+    scripts: Set<string>, // script address list
+  }
+
+  interface MountParam {
+    container: HTMLElement | ShadowRoot // app container
+    inline: boolean // run js in inline mode
+    useMemoryRouter: boolean // use virtual router
+    defaultPage: string // default page of virtual router
+    baseroute: string // route prefix, default is ''
+    disablePatchRequest: boolean // prevent rewrite request method of child app
+    fiber: boolean // run js in fiber mode
+    esmodule: boolean // support type='module' script
+    // hiddenRouter: boolean
+  }
+
+  interface UnmountParam {
+    destroy: boolean, // completely destroy, delete cache resources
+    clearData: boolean // clear data of dateCenter
+    keepRouteState: boolean // keep route state when unmount, default is false
+    unmountcb?: CallableFunction // callback of unmount
+  }
+
+  // app instance
+  interface AppInterface {
+    source: sourceType // source list
+    sandBox: SandBoxInterface | null // sandbox
+    name: string // app name
+    url: string // app url
+    scopecss: boolean // whether use css scoped, default is true
+    useSandbox: boolean // whether use js sandbox, default is true
+    inline: boolean //  whether js runs in inline script mode, default is false
+    esmodule: boolean // support esmodule in script
+    ssrUrl: string // html path in ssr mode
+    container: HTMLElement | ShadowRoot | null // container maybe null, micro-app, shadowRoot, div(keep-alive)
+    umdMode: boolean // is umd mode
+    fiber: boolean // fiber mode
+    useMemoryRouter: boolean // use virtual router
+    isPrefetch: boolean // whether prefetch app, default is false
+    isPrerender: boolean
+    prefetchLevel?: number
+    // defaultPage: string // default page when mount
+    // baseroute: string // route prefix, default is ''
+    // hiddenRouter: boolean // hide router info of child from browser url
+
+    // Load resources
+    loadSourceCode (): void
+
+    // resource is loaded
+    onLoad (html: HTMLElement, defaultPage?: string, disablePatchRequest?: boolean): void
+
+    // Error loading HTML
+    onLoadError (e: Error): void
+
+    // mount app
+    mount (mountParams: MountParam): void
+
+    // unmount app
+    unmount (unmountParam: UnmountParam): void
+
+    // app rendering error
+    onerror (e: Error): void
+
+    // get app state
+    getAppState (): string
+
+    getKeepAliveState(): string | null
+
+    // actions for completely destroy
+    actionsForCompletelyDestroy (): void
+
+    // hidden app when disconnectedCallback with keep-alive
+    hiddenKeepAliveApp (callback?: CallableFunction): void
+
+    // show app when connectedCallback with keep-alive
+    showKeepAliveApp (container: HTMLElement | ShadowRoot): void
   }
 
   interface MicroAppElementType {
-    name: AttrType // 应用名称
-    url: AttrType // 应用地址
-    isWating: boolean // 是否正在合并执行
-    cacheData: Record<PropertyKey, unknown> | null // data缓存数据
-    connectedCallback(): void // 元素插入文档中的钩子函数
-    disconnectedCallback(): void // 元素被删除的钩子函数
-    attributeChangedCallback(a: 'name' | 'url', o: string, n: string): void // 监听属性发生变化
-    handleAttributeUpdate(): void // 处理初始化后name或url发生变化
-    legalAttribute(name: string, val: AttrType): boolean // 判断元素属性是否符合条件
-    handleCreate(): void // 创建应用
-    handleUnmount (destory: boolean): void // 卸载应用
-    getDisposeResult (name: string): boolean // 获取配置结果
+    appName: AttrType // app name
+    appUrl: AttrType // app url
+
+    // Hooks for element append to documents
+    connectedCallback (): void
+
+    // Hooks for element delete from documents
+    disconnectedCallback (): void
+
+    // Hooks for element attributes change
+    attributeChangedCallback (a: 'name' | 'url', o: string, n: string): void
   }
 
-  type sourceLinkInfo = {
-    code: string // 代码内容
-    placeholder?: Comment | null // 占位注释元素
-    isGlobal: boolean // 是否全局资源
-  }
-
-  type sourceScriptInfo = {
-    code: string // 代码内容
-    isExternal: boolean // 是否是远程script
-    isDynamic: boolean // 是否是动态创建的script
-    async: boolean // 异步脚本
-    defer: boolean // 延迟执行
-    module: boolean // module类型
-    isGlobal?: boolean // 是否是全局script
-  }
-
-  interface sourceType {
-    html?: HTMLElement
-    links: Map<string, sourceLinkInfo>
-    scripts: Map<string, sourceScriptInfo>
-  }
-
-  // 微应用实例
-  interface AppInterface {
-    isPrefetch: boolean // 是否是预加载，默认false
-    name: string // 应用名称
-    url: string // 应用地址
-    container: HTMLElement | ShadowRoot | null // dom容器
-    inline: boolean // 是否使用内联script
-    scopecss: boolean // 是否使用css隔离
-    useSandbox: boolean // 是否开启沙盒
-    macro: boolean // 是否使用宏任务延迟
-    baseurl: string // 路由前缀
-    source: sourceType // 资源列表
-    sandBox: SandBoxInterface | null // 沙盒实例
-    loadSourceCode(): void // 开始加载静态资源
-    onLoad(html: HTMLElement): void // 资源加载完成，还没执行
-    onLoadError(e: Error): void // 加载html静态资源失败
-    mount(
-      container?: HTMLElement | ShadowRoot,
-      inline?: boolean,
-      baseurl?: string,
-    ): void // 初始化资源完成后进行渲染
-    unmount(destory: boolean): void // 卸载应用
-    onerror(e: Error): void // 渲染出错
-    getAppStatus(): string // 获取应用状态
-  }
-
-  type prefetchParam = {
+  interface prefetchParam {
     name: string,
     url: string,
+    // old config 👇
     disableScopecss?: boolean
     disableSandbox?: boolean
-    macro?: boolean
-    shadowDOM?: boolean
+    // old config 👆
+    'disable-scopecss'?: boolean
+    'disable-sandbox'?: boolean
+    inline?: boolean
+    esmodule?: boolean
+    level?: number
+    'default-page'?: string
+    'disable-patch-request'?: boolean
   }
 
-  // 预加载入参
+  // prefetch params
   type prefetchParamList = Array<prefetchParam> | (() => Array<prefetchParam>)
 
-  // 声明周期
+  // lifeCycles
   interface lifeCyclesType {
-    created?(e?: CustomEvent): void
-    beforemount?(e?: CustomEvent): void
-    mounted?(e?: CustomEvent): void
-    unmount?(e?: CustomEvent): void
-    error?(e?: CustomEvent): void
+    created(e: CustomEvent): void
+    beforemount(e: CustomEvent): void
+    mounted(e: CustomEvent): void
+    unmount(e: CustomEvent): void
+    error(e: CustomEvent): void
+    beforeshow(e: CustomEvent): void
+    aftershow(e: CustomEvent): void
+    afterhidden(e: CustomEvent): void
   }
 
+  type AssetsChecker = (url: string) => boolean;
+
   type plugins = {
-    // 全局插件
+    // global plugin
     global?: Array<{
-      // 强隔离的全局变量
+      // Scoped global Properties
       scopeProperties?: Array<PropertyKey>
-      // 可以逃逸到外部的全局变量
+      // Properties that can be escape to rawWindow
       escapeProperties?: Array<PropertyKey>
-      // 配置项
-      options?: unknown
-      // 处理函数
-      loader?: (code: string, url: string, options: unknown) => string
+      // Exclude JS or CSS
+      excludeChecker?: AssetsChecker
+      // Ignore JS or CSS
+      ignoreChecker?: AssetsChecker
+      // options for plugin as the third parameter of loader
+      options?: Record<string, unknown>
+      // handle function
+      loader?: (code: string, url: string) => string
+      // html processor
+      processHtml?: (code: string, url: string) => string
     }>
 
-    // 子应用单独配置插件
+    // plugin for special app
     modules?: {
       [name: string]: Array<{
-        // 强隔离的全局变量
+        // Scoped global Properties
         scopeProperties?: Array<PropertyKey>
-        // 可以逃逸到外部的全局变量
+        // Properties that can be escape to rawWindow
         escapeProperties?: Array<PropertyKey>
-        // 配置项
-        options?: unknown
-        // 处理函数
-        loader?: (code: string, url: string, options: unknown) => string
+        // Exclude JS or CSS
+        excludeChecker?: AssetsChecker
+        // Ignore JS or CSS
+        ignoreChecker?: AssetsChecker
+        // options for plugin as the third parameter of loader
+        options?: Record<string, unknown>
+        // handle function
+        loader?: (code: string, url: string) => string
+        // html processor
+        processHtml?: (code: string, url: string) => string
       }>
     }
   }
 
-  type fetchType = (url: string, options: Record<string, unknown>, appName: string) => Promise<string>
+  type GetActiveAppsParam = {
+    excludeHiddenApp?: boolean,
+    excludePreRender?: boolean,
+  }
 
-  type OptionsType = {
-    tagName?: string
+  type fetchType = (url: string, options: Record<string, unknown>, appName: string | null) => Promise<string>
+
+  type globalAssetsType = {
+    js?: string[],
+    css?: string[],
+  }
+
+  interface MicroAppConfig {
     shadowDOM?: boolean
+    destroy?: boolean
     destory?: boolean
     inline?: boolean
+    // old config 👇
     disableScopecss?: boolean
     disableSandbox?: boolean
-    macro?: boolean
+    // old config 👆
+    'disable-scopecss'?: boolean
+    'disable-sandbox'?: boolean
+    'disable-memory-router'?: boolean
+    'disable-patch-request'?: boolean
+    'keep-router-state'?: boolean
+    'hidden-router'?: boolean
+    'keep-alive'?: boolean
+    'clear-data'?: boolean
+    esmodule?: boolean
+    ssr?: boolean
+    fiber?: boolean
+    prefetchLevel?: number
+    prefetchDelay?: number
+  }
+
+  interface OptionsType extends MicroAppConfig {
+    tagName?: string
     lifeCycles?: lifeCyclesType
     preFetchApps?: prefetchParamList
     plugins?: plugins
     fetch?: fetchType
+    globalAssets?: globalAssetsType,
+    excludeAssetFilter?: (assetUrl: string) => boolean
   }
 
-  // MicroApp 配置对象
-  interface MicroAppConfigType {
+  // MicroApp config
+  interface MicroAppBaseType {
     tagName: string
-    shadowDOM?: boolean
-    destory?: boolean
-    inline?: boolean
-    disableScopecss?: boolean
-    disableSandbox?: boolean
-    macro?: boolean
-    lifeCycles?: lifeCyclesType
-    plugins?: plugins
-    fetch?: fetchType
+    options: OptionsType
     preFetch(apps: prefetchParamList): void
+    router: Router // eslint-disable-line
     start(options?: OptionsType): void
   }
+
+  // special CallableFunction for interact
+  type CallableFunctionForInteract = CallableFunction & { __APP_NAME__?: string, __AUTO_TRIGGER__?: boolean }
+
+  interface ShadowLocation {
+    [k: string]: string
+  }
+
+  interface MicroLocation extends Location, URL {
+    // shadowLocation is the current location information (href, pathname, search, hash)
+    shadowLocation: ShadowLocation
+    fullPath: string
+    [key: string]: any
+  }
+
+  type MicroHistory = ProxyHandler<History>
+  type MicroState = any
+  type HistoryProxyValue =
+    Pick<
+    History,
+    'length' |
+    'scrollRestoration' |
+    'state' |
+    'back' |
+    'forward' |
+    'go' |
+    'pushState' |
+    'replaceState'
+    > | CallableFunction
+  interface MicroRouter {
+    microLocation: MicroLocation
+    microHistory: MicroHistory
+  }
+  type LocationQueryValue = string | null
+  type LocationQueryObject = Record<
+  string,
+  LocationQueryValue | LocationQueryValue[]
+  >
+
+  type LocationQuery = {
+    hashQuery?: LocationQueryObject,
+    searchQuery?: LocationQueryObject
+  }
+
+  type GuardLocation = Record<keyof MicroLocation, any>
+
+  type CurrentRoute = Map<string, GuardLocation>
+
+  interface RouterTarget {
+    name: string
+    path: string
+    state?: unknown
+    replace?: boolean
+  }
+
+  type navigationMethod = (to: RouterTarget) => void
+
+  interface AccurateGuard {
+    [appName: string]: (to: GuardLocation, from: GuardLocation) => void
+  }
+
+  type GlobalNormalGuard = ((to: GuardLocation, from: GuardLocation, appName: string) => void)
+
+  type RouterGuard = AccurateGuard | GlobalNormalGuard
+
+  type SetDefaultPageOptions = {
+    name: string,
+    path: string,
+  }
+
+  type AttachAllToURLParam = {
+    includeHiddenApp?: boolean,
+    includePreRender?: boolean,
+  }
+
+  // Router API for developer
+  interface Router {
+    // current route of all apps
+    readonly current: CurrentRoute
+    /**
+     * encodeURI of microApp path
+     * @param path url path
+     */
+    encode(path: string): string
+    /**
+     * decodeURI of microApp path
+     * @param path url path
+     */
+    decode(path: string): ReturnType<Router['encode']>
+    /**
+     * Navigate to a new URL by pushing an entry in the history
+     * stack.
+     * @param to - Route location to navigate to
+     */
+    push: navigationMethod
+    /**
+     * Navigate to a new URL by replacing the current entry in
+     * the history stack.
+     *
+     * @param to - Route location to navigate to
+     */
+    replace: navigationMethod
+    /**
+     * Move forward or backward through the history. calling `history.go()`.
+     *
+     * @param delta - The position in the history to which you want to move,
+     * relative to the current page
+     */
+    go: Func
+    /**
+     * Go back in history if possible by calling `history.back()`.
+     */
+    back: Func
+    /**
+     * Go forward in history if possible by calling `history.forward()`.
+     */
+    forward: Func
+    /**
+     * Add a navigation guard that executes before any navigation
+     * @param guard global hook for
+     */
+    beforeEach(guard: RouterGuard): () => boolean
+    /**
+     * Add a navigation guard that executes after any navigation
+     * @param guard global hook for
+     */
+    afterEach(guard: RouterGuard): () => boolean
+    /**
+     * Add defaultPage to control the first rendered page
+     * @param options SetDefaultPageOptions
+     */
+    setDefaultPage(options: SetDefaultPageOptions): () => boolean
+    /**
+     * Clear data of defaultPage that set by setDefaultPage
+     */
+    removeDefaultPage(appName: string): boolean
+    /**
+     * Get defaultPage that set by setDefaultPage
+     */
+    getDefaultPage(key: PropertyKey): string | void
+    /**
+     * Attach specified active app router info to browser url
+     */
+    attachToURL(appName: string): void
+    /**
+     * Attach all active app router info to browser url
+     */
+    attachAllToURL(options: AttachAllToURLParam): void
+    /**
+     * Record base app router, let child app control base app navigation
+     * It is global data
+     * @param baseRouter router instance of base app
+     */
+    setBaseAppRouter(baseRouter: unknown): void
+    /**
+     * get baseRouter from cache
+     */
+    getBaseAppRouter(): unknown
+  }
+
+  // result of add/remove microApp path on browser url
+  type HandleMicroPathResult = {
+    fullPath: string,
+    isAttach2Hash: boolean,
+  }
 }
+
+declare namespace JSX {
+  interface IntrinsicElements {
+    'micro-app': any
+  }
+}
+
+declare module '@micro-zoe/micro-app/polyfill/jsx-custom-event'
+
+declare const __DEV__: boolean
+
+declare const __TEST__: boolean

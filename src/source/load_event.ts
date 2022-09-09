@@ -1,3 +1,5 @@
+import { isFunction } from '../libs/utils'
+
 function eventHandler (event: Event, element: HTMLLinkElement | HTMLScriptElement): void {
   Object.defineProperties(event, {
     currentTarget: {
@@ -21,8 +23,8 @@ function eventHandler (event: Event, element: HTMLLinkElement | HTMLScriptElemen
 export function dispatchOnLoadEvent (element: HTMLLinkElement | HTMLScriptElement): void {
   const event = new CustomEvent('load')
   eventHandler(event, element)
-  if (typeof element.onload === 'function') {
-    element.onload(event)
+  if (isFunction(element.onload)) {
+    element.onload!(event)
   } else {
     element.dispatchEvent(event)
   }
@@ -31,8 +33,8 @@ export function dispatchOnLoadEvent (element: HTMLLinkElement | HTMLScriptElemen
 export function dispatchOnErrorEvent (element: HTMLLinkElement | HTMLScriptElement): void {
   const event = new CustomEvent('error')
   eventHandler(event, element)
-  if (typeof element.onerror === 'function') {
-    element.onerror(event)
+  if (isFunction(element.onerror)) {
+    element.onerror!(event)
   } else {
     element.dispatchEvent(event)
   }

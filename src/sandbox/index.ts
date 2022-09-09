@@ -1,145 +1,357 @@
-import type { SandBoxInterface, microWindowType } from '@micro-app/types'
-import bindFunction from './bind_function'
+/* eslint-disable no-cond-assign */
+import type {
+  microAppWindowType,
+  SandBoxInterface,
+  plugins,
+  MicroLocation,
+  SandBoxAdapter,
+  SandBoxStartParams,
+  SandBoxStopParams,
+  EffectController,
+} from '@micro-app/types'
 import {
-  unique,
-  setCurrentAppName,
-  defer,
+  EventCenterForMicroApp,
+  rebuildDataCenterSnapshot,
+  recordDataCenterSnapshot,
+} from '../interact'
+import globalEnv from '../libs/global_env'
+import { initEnvOfNestedApp } from '../libs/nest_app'
+import {
   getEffectivePath,
-  rawWindow,
-  rawDocument,
+  isArray,
+  isPlainObject,
+  isString,
+  isUndefined,
+  removeDomScope,
+  unique,
+  throttleDeferForSetAppName,
+  rawDefineProperty,
+  rawDefineProperties,
+  isFunction,
+  rawHasOwnProperty,
+  pureCreateElement,
+  assign,
 } from '../libs/utils'
-import effect, { effectDocumentEvent, releaseEffectDocumentEvent } from './effect'
-import { EventCenterForMicroApp } from '../interact'
 import microApp from '../micro_app'
+import bindFunctionToRawObject from './bind_function'
+import effect, {
+  effectDocumentEvent,
+  releaseEffectDocumentEvent,
+} from './effect'
+import {
+  patchElementPrototypeMethods,
+  releasePatches,
+} from '../source/patch'
+import createMicroRouter, {
+  router,
+  initRouteStateWithURL,
+  clearRouteStateFromURL,
+  addHistoryListener,
+  removeStateAndPathFromBrowser,
+  updateBrowserURLWithLocation,
+  patchHistory,
+  releasePatchHistory,
+} from './router'
+import Adapter, {
+  fixBabelPolyfill6,
+  throttleDeferForParentNode,
+} from './adapter'
+import {
+  createMicroFetch,
+  useMicroEventSource,
+  createMicroXMLHttpRequest,
+} from './request'
+export {
+  router,
+  getNoHashMicroPathFromURL,
+} from './router'
 
-/* eslint-disable camelcase */
-type injectDataType = {
-  __MICRO_APP_ENVIRONMENT__: boolean
-  __MICRO_APP_NAME__: string
-  __MICRO_APP_PUBLIC_PATH__: string
-  __MICRO_APP_BASE_URL__: string
-  microApp: EventCenterForMicroApp
-  rawWindow: Window
-  rawDocument: Document
+export type MicroAppWindowDataType = {
+  __MICRO_APP_ENVIRONMENT__: boolean,
+  __MICRO_APP_NAME__: string,
+  __MICRO_APP_URL__: string,
+  __MICRO_APP_PUBLIC_PATH__: string,
+  __MICRO_APP_BASE_URL__: string,
+  __MICRO_APP_BASE_ROUTE__: string,
+  __MICRO_APP_UMD_MODE__: boolean,
+  __MICRO_APP_PRE_RENDER__: boolean
+  microApp: EventCenterForMicroApp,
+  rawWindow: Window,
+  rawDocument: Document,
+  removeDomScope: () => void,
 }
+export type MicroAppWindowType = Window & MicroAppWindowDataType
+export type proxyWindow = WindowProxy & MicroAppWindowDataType
 
-// 可以逃逸到外层window的变量
-const staticEscapeProperties: PropertyKey[] = [
-  'System',
-  '__cjsWrapper',
-  '__REACT_ERROR_OVERLAY_GLOBAL_HOOK__',
-]
-
-// 一些只能赋值到原window上的变量
-const escapeSetterKeyList: PropertyKey[] = [
-  'location',
-]
-
-const unscopables = {
-  undefined: true,
-  Array: true,
-  Object: true,
-  String: true,
-  Boolean: true,
-  Math: true,
-  Number: true,
-  Symbol: true,
-  parseFloat: true,
-  Float32Array: true,
-}
-
-/**
- * 宏任务延迟执行，解决vue3的部分渲染问题
- */
-let macroTimer: number
-function macroTask (fn: TimerHandler): void {
-  if (macroTimer) clearTimeout(macroTimer)
-  macroTimer = setTimeout(fn, 0)
-}
+const { createMicroEventSource, clearMicroEventSource } = useMicroEventSource()
+const globalPropertyList: Array<PropertyKey> = ['window', 'self', 'globalThis']
 
 export default class SandBox implements SandBoxInterface {
-  static activeCount = 0 // 正在运行的沙盒数量
-  active = false // 当前沙盒运行状态
-  proxyWindow: WindowProxy & injectDataType
-  releaseEffect: CallableFunction
-  // 强隔离的全局变量(只能在沙箱中获取和设置的属性，不会兜底到外层window)
-  scopeProperties: PropertyKey[] = ['webpackJsonp']
-  // 可以泄漏到外部window的全局变量
-  escapeProperties: PropertyKey[] = []
-  microWindow = {} as Window & injectDataType // 代理原型
-  injectedKeys: Set<PropertyKey> = new Set() // proxyWindow新添加的属性
-  escapeKeys: Set<PropertyKey> = new Set() // 泄漏到外部window的变量，卸载时清除
+  static activeCount = 0 // number of active sandbox
+  private effectController: EffectController
+  private removeHistoryListener!: CallableFunction
+  private adapter: SandBoxAdapter
+  /**
+   * Scoped global Properties(Properties that can only get and set in microAppWindow, will not escape to rawWindow)
+   * Fix https://github.com/micro-zoe/micro-app/issues/234
+   */
+  private scopeProperties: PropertyKey[] = []
+  // Properties that can be escape to rawWindow
+  private escapeProperties: PropertyKey[] = []
+  // Properties newly added to microAppWindow
+  private injectedKeys = new Set<PropertyKey>()
+  // Properties escape to rawWindow, cleared when unmount
+  private escapeKeys = new Set<PropertyKey>()
+  // record injected values before the first execution of umdHookMount and rebuild before remount umd app
+  // private recordUmdInjectedValues?: Map<PropertyKey, unknown>
+  // sandbox state
+  private active = false
+  public proxyWindow: proxyWindow // Proxy
+  public microAppWindow = {} as MicroAppWindowType // Proxy target
 
-  constructor (appName: string, url: string, macro: boolean) {
+  constructor (appName: string, url: string) {
+    this.adapter = new Adapter()
+    // get scopeProperties and escapeProperties from plugins
+    this.getSpecialProperties(appName)
+    // create proxyWindow with Proxy(microAppWindow)
+    this.proxyWindow = this.createProxyWindow(appName)
+    // Rewrite global event listener & timeout
+    this.effectController = effect(appName, this.microAppWindow)
+    // inject global properties
+    this.initStaticGlobalKeys(this.microAppWindow, appName, url)
+  }
+
+  /**
+   * open sandbox and perform some initial actions
+   * @param umdMode is umd mode
+   * @param baseroute base route for child
+   * @param useMemoryRouter use virtual router
+   * @param defaultPage default page when mount child base on virtual router
+   * @param disablePatchRequest prevent patchRequestApi
+   */
+  public start ({
+    umdMode,
+    baseroute,
+    useMemoryRouter,
+    defaultPage,
+    disablePatchRequest,
+  }: SandBoxStartParams): void {
+    if (!this.active) {
+      this.active = true
+      if (useMemoryRouter) {
+        if (isUndefined(this.microAppWindow.location)) {
+          this.setMicroAppRouter(
+            this.microAppWindow,
+            this.microAppWindow.__MICRO_APP_NAME__,
+            this.microAppWindow.__MICRO_APP_URL__,
+          )
+        }
+        this.initRouteState(defaultPage)
+        // unique listener of popstate event for sub app
+        this.removeHistoryListener = addHistoryListener(
+          this.microAppWindow.__MICRO_APP_NAME__,
+        )
+      } else {
+        this.microAppWindow.__MICRO_APP_BASE_ROUTE__ = this.microAppWindow.__MICRO_APP_BASE_URL__ = baseroute
+      }
+
+      /**
+       * 1. Prevent the key deleted during sandBox.stop after rewrite
+       * 2. Umd mode will not delete any keys during sandBox.stop
+       * 3. It must not be umd mode when call sandbox.start at the first time
+       */
+      if (!umdMode) {
+        this.initGlobalKeysWhenStart(
+          this.microAppWindow,
+          this.microAppWindow.__MICRO_APP_NAME__,
+          this.microAppWindow.__MICRO_APP_URL__,
+          disablePatchRequest,
+        )
+      }
+
+      if (++SandBox.activeCount === 1) {
+        effectDocumentEvent()
+        patchElementPrototypeMethods()
+        initEnvOfNestedApp()
+        patchHistory()
+      }
+
+      fixBabelPolyfill6()
+    }
+  }
+
+  /**
+   * close sandbox and perform some clean up actions
+   * @param umdMode is umd mode
+   * @param keepRouteState prevent reset route
+   * @param clearEventSource clear MicroEventSource when destroy
+   * @param clearData clear data from base app
+   */
+  public stop ({
+    umdMode,
+    keepRouteState,
+    clearEventSource,
+    clearData,
+  }: SandBoxStopParams): void {
+    if (this.active) {
+      // clear global event, timeout, data listener
+      this.releaseGlobalEffect(clearData)
+
+      if (this.removeHistoryListener) {
+        this.clearRouteState(keepRouteState)
+        // release listener of popstate
+        this.removeHistoryListener()
+      }
+
+      if (clearEventSource) {
+        clearMicroEventSource(this.microAppWindow.__MICRO_APP_NAME__)
+      }
+
+      /**
+       * NOTE:
+       *  1. injectedKeys and escapeKeys must be placed at the back
+       *  2. if key in initial microAppWindow, and then rewrite, this key will be delete from microAppWindow when stop, and lost when restart
+       *  3. umd mode will not delete global keys
+       */
+      if (!umdMode) {
+        this.injectedKeys.forEach((key: PropertyKey) => {
+          Reflect.deleteProperty(this.microAppWindow, key)
+        })
+        this.injectedKeys.clear()
+
+        this.escapeKeys.forEach((key: PropertyKey) => {
+          Reflect.deleteProperty(globalEnv.rawWindow, key)
+        })
+        this.escapeKeys.clear()
+      }
+
+      if (--SandBox.activeCount === 0) {
+        releaseEffectDocumentEvent()
+        releasePatches()
+        releasePatchHistory()
+      }
+
+      this.active = false
+    }
+  }
+
+  /**
+   * clear global event, timeout, data listener
+   * Scenes:
+   * 1. unmount of normal/umd app
+   * 2. hidden keep-alive app
+   * 3. after init prerender app
+   * @param clearData clear data from base app
+   */
+  public releaseGlobalEffect (clearData = false): void {
+    this.effectController.releaseEffect()
+    this.microAppWindow.microApp.clearDataListener()
+    this.microAppWindow.microApp.clearGlobalDataListener()
+    if (clearData) {
+      microApp.clearData(this.microAppWindow.__MICRO_APP_NAME__)
+      this.microAppWindow.microApp.clearData()
+    }
+  }
+
+  /**
+   * record umd snapshot before the first execution of umdHookMount
+   * Scenes:
+   * 1. exec umdMountHook in umd mode
+   * 2. hidden keep-alive app
+   * 3. after init prerender app
+   */
+  public recordEffectSnapshot (): void {
+    // this.microAppWindow.__MICRO_APP_UMD_MODE__ = true
+    this.effectController.recordEffect()
+    recordDataCenterSnapshot(this.microAppWindow.microApp)
+
+    // this.recordUmdInjectedValues = new Map<PropertyKey, unknown>()
+    // this.injectedKeys.forEach((key: PropertyKey) => {
+    //   this.recordUmdInjectedValues!.set(key, Reflect.get(this.microAppWindow, key))
+    // })
+  }
+
+  // rebuild umd snapshot before remount umd app
+  public rebuildEffectSnapshot (): void {
+    // this.recordUmdInjectedValues!.forEach((value: unknown, key: PropertyKey) => {
+    //   Reflect.set(this.proxyWindow, key, value)
+    // })
+    this.effectController.rebuildEffect()
+    rebuildDataCenterSnapshot(this.microAppWindow.microApp)
+  }
+
+  // set __MICRO_APP_PRE_RENDER__ state
+  public setPreRenderState (state: boolean): void {
+    this.microAppWindow.__MICRO_APP_PRE_RENDER__ = state
+  }
+
+  /**
+   * get scopeProperties and escapeProperties from plugins & adapter
+   * @param appName app name
+   */
+  private getSpecialProperties (appName: string): void {
+    this.scopeProperties = this.scopeProperties.concat(this.adapter.staticScopeProperties)
+    if (isPlainObject(microApp.options.plugins)) {
+      this.commonActionForSpecialProperties(microApp.options.plugins.global)
+      this.commonActionForSpecialProperties(microApp.options.plugins.modules?.[appName])
+    }
+  }
+
+  // common action for global plugins and module plugins
+  private commonActionForSpecialProperties (plugins: plugins['global']) {
+    if (isArray(plugins)) {
+      for (const plugin of plugins) {
+        if (isPlainObject(plugin)) {
+          if (isArray(plugin.scopeProperties)) {
+            this.scopeProperties = this.scopeProperties.concat(plugin.scopeProperties)
+          }
+          if (isArray(plugin.escapeProperties)) {
+            this.escapeProperties = this.escapeProperties.concat(plugin.escapeProperties)
+          }
+        }
+      }
+    }
+  }
+
+  // create proxyWindow with Proxy(microAppWindow)
+  private createProxyWindow (appName: string) {
+    const rawWindow = globalEnv.rawWindow
     const descriptorTargetMap = new Map<PropertyKey, 'target' | 'rawWindow'>()
-    const hasOwnProperty = (key: PropertyKey) => this.microWindow.hasOwnProperty(key) || rawWindow.hasOwnProperty(key)
-    // 通过插件系统获取隔离属性和可逃逸属性
-    this.getScopeProperties(appName)
-    // 注入全局变量
-    this.inject(this.microWindow, appName, url)
-    // 重写全局事件监听&定时器
-    this.releaseEffect = effect(this.microWindow)
-
-    this.proxyWindow = new Proxy(this.microWindow, {
-      get: (target: microWindowType, key: PropertyKey): unknown => {
-        if (key === Symbol.unscopables) return unscopables
-
-        if (['window', 'self', 'globalThis'].includes(key as string)) {
-          return this.proxyWindow
-        }
-
-        if (key === 'top' || key === 'parent') {
-          if (rawWindow === rawWindow.parent) { // 不在iframe
-            return this.proxyWindow
-          }
-          return Reflect.get(rawWindow, key) // iframe
-        }
-
-        if (key === 'hasOwnProperty') return hasOwnProperty
-
-        if (key === 'document' || key === 'eval') {
-          setCurrentAppName(appName)
-          ;(macro ? macroTask : defer)(() => setCurrentAppName(null))
-          switch (key) {
-            case 'document':
-              return rawDocument
-            case 'eval':
-              return eval
-          }
-        }
-
-        if (this.scopeProperties.includes(key)) {
-          return Reflect.get(target, key)
-        }
-
-        if (Reflect.has(target, key)) {
-          return Reflect.get(target, key)
-        }
+    // window.xxx will trigger proxy
+    return new Proxy(this.microAppWindow, {
+      get: (target: microAppWindowType, key: PropertyKey): unknown => {
+        throttleDeferForSetAppName(appName)
+        if (
+          Reflect.has(target, key) ||
+          (isString(key) && /^__MICRO_APP_/.test(key)) ||
+          this.scopeProperties.includes(key)
+        ) return Reflect.get(target, key)
 
         const rawValue = Reflect.get(rawWindow, key)
 
-        return bindFunction(rawWindow, rawValue)
+        return isFunction(rawValue) ? bindFunctionToRawObject(rawWindow, rawValue) : rawValue
       },
-      set: (target: microWindowType, key: PropertyKey, value: unknown): boolean => {
+      set: (target: microAppWindowType, key: PropertyKey, value: unknown): boolean => {
         if (this.active) {
-          if (escapeSetterKeyList.includes(key)) {
+          if (this.adapter.escapeSetterKeyList.includes(key)) {
             Reflect.set(rawWindow, key, value)
           } else if (
-            !target.hasOwnProperty(key) &&
-            rawWindow.hasOwnProperty(key) &&
+            // target.hasOwnProperty has been rewritten
+            !rawHasOwnProperty.call(target, key) &&
+            rawHasOwnProperty.call(rawWindow, key) &&
             !this.scopeProperties.includes(key)
           ) {
             const descriptor = Object.getOwnPropertyDescriptor(rawWindow, key)
-            const { writable, configurable, enumerable } = descriptor!
-            if (writable) {
-              Object.defineProperty(target, key, {
-                configurable,
-                enumerable,
-                writable,
-                value,
-              })
-              this.injectedKeys.add(key)
-            }
+            const { configurable, enumerable, writable, set } = descriptor!
+            // set value because it can be set
+            rawDefineProperty(target, key, {
+              value,
+              configurable,
+              enumerable,
+              writable: writable ?? !!set,
+            })
+
+            this.injectedKeys.add(key)
           } else {
             Reflect.set(target, key, value)
             this.injectedKeys.add(key)
@@ -148,7 +360,10 @@ export default class SandBox implements SandBoxInterface {
           if (
             (
               this.escapeProperties.includes(key) ||
-              (staticEscapeProperties.includes(key) && !Reflect.has(rawWindow, key))
+              (
+                this.adapter.staticEscapeProperties.includes(key) &&
+                !Reflect.has(rawWindow, key)
+              )
             ) &&
             !this.scopeProperties.includes(key)
           ) {
@@ -159,17 +374,18 @@ export default class SandBox implements SandBoxInterface {
 
         return true
       },
-      has: (target: microWindowType, key: PropertyKey): boolean => {
+      has: (target: microAppWindowType, key: PropertyKey): boolean => {
         if (this.scopeProperties.includes(key)) return key in target
-        return key in unscopables || key in target || key in rawWindow
+        return key in target || key in rawWindow
       },
-      getOwnPropertyDescriptor: (target: microWindowType, key: PropertyKey): PropertyDescriptor|undefined => {
-        if (target.hasOwnProperty(key)) {
+      // Object.getOwnPropertyDescriptor(window, key)
+      getOwnPropertyDescriptor: (target: microAppWindowType, key: PropertyKey): PropertyDescriptor|undefined => {
+        if (rawHasOwnProperty.call(target, key)) {
           descriptorTargetMap.set(key, 'target')
           return Object.getOwnPropertyDescriptor(target, key)
         }
 
-        if (rawWindow.hasOwnProperty(key)) {
+        if (rawHasOwnProperty.call(rawWindow, key)) {
           descriptorTargetMap.set(key, 'rawWindow')
           const descriptor = Object.getOwnPropertyDescriptor(rawWindow, key)
           if (descriptor && !descriptor.configurable) {
@@ -180,21 +396,22 @@ export default class SandBox implements SandBoxInterface {
 
         return undefined
       },
-      defineProperty: (target: microWindowType, key: PropertyKey, value: PropertyDescriptor): boolean => {
+      // Object.defineProperty(window, key, Descriptor)
+      defineProperty: (target: microAppWindowType, key: PropertyKey, value: PropertyDescriptor): boolean => {
         const from = descriptorTargetMap.get(key)
         if (from === 'rawWindow') {
           return Reflect.defineProperty(rawWindow, key, value)
         }
         return Reflect.defineProperty(target, key, value)
       },
-      ownKeys: (target: microWindowType): Array<string | symbol> => {
+      // Object.getOwnPropertyNames(window)
+      ownKeys: (target: microAppWindowType): Array<string | symbol> => {
         return unique(Reflect.ownKeys(rawWindow).concat(Reflect.ownKeys(target)))
       },
-      deleteProperty: (target: microWindowType, key: PropertyKey): boolean => {
-        if (target.hasOwnProperty(key)) {
-          if (this.escapeKeys.has(key)) {
-            Reflect.deleteProperty(rawWindow, key)
-          }
+      deleteProperty: (target: microAppWindowType, key: PropertyKey): boolean => {
+        if (rawHasOwnProperty.call(target, key)) {
+          this.injectedKeys.has(key) && this.injectedKeys.delete(key)
+          this.escapeKeys.has(key) && Reflect.deleteProperty(rawWindow, key)
           return Reflect.deleteProperty(target, key)
         }
         return true
@@ -202,85 +419,329 @@ export default class SandBox implements SandBoxInterface {
     })
   }
 
-  start (baseurl: string): void {
-    if (!this.active) {
-      this.active = true
-      this.microWindow.__MICRO_APP_BASE_URL__ = baseurl
-      if (rawWindow._babelPolyfill) rawWindow._babelPolyfill = false
-      if (++SandBox.activeCount === 1) {
-        effectDocumentEvent()
-      }
-    }
-  }
-
-  stop (): void {
-    if (this.active) {
-      this.active = false
-      this.releaseEffect()
-      this.microWindow.microApp.clearDataListener()
-
-      this.injectedKeys.forEach((key) => {
-        Reflect.deleteProperty(this.microWindow, key)
-      })
-      this.injectedKeys.clear()
-
-      this.escapeKeys.forEach((key) => {
-        Reflect.deleteProperty(rawWindow, key)
-      })
-      this.escapeKeys.clear()
-
-      if (--SandBox.activeCount === 0) {
-        releaseEffectDocumentEvent()
-      }
-    }
-  }
-
   /**
-   * 通过插件系统获取隔离属性和可逃逸属性
-   * @param appName 应用名称
-   */
-  getScopeProperties (appName: string): void {
-    if (typeof microApp.plugins !== 'object') return
-
-    if (toString.call(microApp.plugins.global) === '[object Array]') {
-      for (const plugin of microApp.plugins.global!) {
-        if (typeof plugin === 'object') {
-          if (toString.call(plugin.scopeProperties) === '[object Array]') {
-            this.scopeProperties = this.scopeProperties.concat(plugin.scopeProperties!)
-          }
-          if (toString.call(plugin.escapeProperties) === '[object Array]') {
-            this.escapeProperties = this.escapeProperties.concat(plugin.escapeProperties!)
-          }
-        }
-      }
-    }
-
-    if (toString.call(microApp.plugins.modules?.[appName]) === '[object Array]') {
-      for (const plugin of microApp.plugins.modules![appName]) {
-        if (typeof plugin === 'object') {
-          if (toString.call(plugin.scopeProperties) === '[object Array]') {
-            this.scopeProperties = this.scopeProperties.concat(plugin.scopeProperties!)
-          }
-          if (toString.call(plugin.escapeProperties) === '[object Array]') {
-            this.escapeProperties = this.escapeProperties.concat(plugin.escapeProperties!)
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * 向原型window注入全局变量
-   * @param microWindow 原型window
-   * @param appName 应用名称
+   * inject global properties to microAppWindow
+   * @param microAppWindow micro window
+   * @param appName app name
    * @param url app url
+   * @param useMemoryRouter whether use memory router
    */
-  inject (microWindow: microWindowType, appName: string, url: string): void {
-    microWindow.__MICRO_APP_ENVIRONMENT__ = true
-    microWindow.__MICRO_APP_NAME__ = appName
-    microWindow.__MICRO_APP_PUBLIC_PATH__ = getEffectivePath(url)
-    microWindow.microApp = new EventCenterForMicroApp(appName)
-    microWindow.rawWindow = rawWindow
-    microWindow.rawDocument = rawDocument
+  private initStaticGlobalKeys (
+    microAppWindow: microAppWindowType,
+    appName: string,
+    url: string,
+  ): void {
+    microAppWindow.__MICRO_APP_ENVIRONMENT__ = true
+    microAppWindow.__MICRO_APP_NAME__ = appName
+    microAppWindow.__MICRO_APP_URL__ = url
+    microAppWindow.__MICRO_APP_PUBLIC_PATH__ = getEffectivePath(url)
+    microAppWindow.__MICRO_APP_WINDOW__ = microAppWindow
+    microAppWindow.__MICRO_APP_PRE_RENDER__ = false
+    microAppWindow.rawWindow = globalEnv.rawWindow
+    microAppWindow.rawDocument = globalEnv.rawDocument
+    microAppWindow.microApp = assign(new EventCenterForMicroApp(appName), {
+      removeDomScope,
+      pureCreateElement,
+      router,
+    })
+
+    this.setProxyDocument(microAppWindow, appName)
+    this.setMappingPropertiesWithRawDescriptor(microAppWindow)
+  }
+
+  private setProxyDocument (microAppWindow: microAppWindowType, appName: string): void {
+    const { proxyDocument, MicroDocument } = this.createProxyDocument(appName)
+    rawDefineProperties(microAppWindow, {
+      document: {
+        configurable: false,
+        enumerable: true,
+        get () {
+          // return globalEnv.rawDocument
+          return proxyDocument
+        },
+      },
+      Document: {
+        configurable: false,
+        enumerable: false,
+        get () {
+          // return globalEnv.rawRootDocument
+          return MicroDocument
+        },
+      }
+    })
+  }
+
+  // properties associated with the native window
+  private setMappingPropertiesWithRawDescriptor (microAppWindow: microAppWindowType): void {
+    let topValue: Window, parentValue: Window
+    const rawWindow = globalEnv.rawWindow
+    if (rawWindow === rawWindow.parent) { // not in iframe
+      topValue = parentValue = this.proxyWindow
+    } else { // in iframe
+      topValue = rawWindow.top
+      parentValue = rawWindow.parent
+    }
+
+    rawDefineProperty(
+      microAppWindow,
+      'top',
+      this.createDescriptorForMicroAppWindow('top', topValue)
+    )
+
+    rawDefineProperty(
+      microAppWindow,
+      'parent',
+      this.createDescriptorForMicroAppWindow('parent', parentValue)
+    )
+
+    globalPropertyList.forEach((key: PropertyKey) => {
+      rawDefineProperty(
+        microAppWindow,
+        key,
+        this.createDescriptorForMicroAppWindow(key, this.proxyWindow)
+      )
+    })
+  }
+
+  private createDescriptorForMicroAppWindow (key: PropertyKey, value: unknown): PropertyDescriptor {
+    const { configurable = true, enumerable = true, writable, set } = Object.getOwnPropertyDescriptor(globalEnv.rawWindow, key) || { writable: true }
+    const descriptor: PropertyDescriptor = {
+      value,
+      configurable,
+      enumerable,
+      writable: writable ?? !!set
+    }
+
+    return descriptor
+  }
+
+  /**
+   * init global properties of microAppWindow when exec sandBox.start
+   * @param microAppWindow micro window
+   * @param appName app name
+   * @param url app url
+   * @param disablePatchRequest prevent rewrite request method of child app
+   */
+  private initGlobalKeysWhenStart (
+    microAppWindow: microAppWindowType,
+    appName: string,
+    url: string,
+    disablePatchRequest: boolean,
+  ): void {
+    microAppWindow.hasOwnProperty = (key: PropertyKey) => rawHasOwnProperty.call(microAppWindow, key) || rawHasOwnProperty.call(globalEnv.rawWindow, key)
+    this.setHijackProperty(microAppWindow, appName)
+    if (!disablePatchRequest) this.patchRequestApi(microAppWindow, appName, url)
+    this.setScopeProperties(microAppWindow)
+  }
+
+  // set hijack Properties to microAppWindow
+  private setHijackProperty (microAppWindow: microAppWindowType, appName: string): void {
+    let modifiedEval: unknown, modifiedImage: unknown
+    rawDefineProperties(microAppWindow, {
+      eval: {
+        configurable: true,
+        enumerable: false,
+        get () {
+          throttleDeferForSetAppName(appName)
+          return modifiedEval || eval
+        },
+        set: (value) => {
+          modifiedEval = value
+        },
+      },
+      Image: {
+        configurable: true,
+        enumerable: false,
+        get () {
+          throttleDeferForSetAppName(appName)
+          return modifiedImage || globalEnv.ImageProxy
+        },
+        set: (value) => {
+          modifiedImage = value
+        },
+      },
+    })
+  }
+
+  // rewrite fetch, XMLHttpRequest, EventSource
+  private patchRequestApi (microAppWindow: microAppWindowType, appName: string, url: string): void {
+    let microFetch = createMicroFetch(url)
+    let microXMLHttpRequest = createMicroXMLHttpRequest(url)
+    let microEventSource = createMicroEventSource(appName, url)
+
+    rawDefineProperties(microAppWindow, {
+      fetch: {
+        configurable: true,
+        enumerable: true,
+        get () {
+          return microFetch
+        },
+        set (value) {
+          microFetch = createMicroFetch(url, value)
+        },
+      },
+      XMLHttpRequest: {
+        configurable: true,
+        enumerable: true,
+        get () {
+          return microXMLHttpRequest
+        },
+        set (value) {
+          microXMLHttpRequest = createMicroXMLHttpRequest(url, value)
+        },
+      },
+      EventSource: {
+        configurable: true,
+        enumerable: true,
+        get () {
+          return microEventSource
+        },
+        set (value) {
+          microEventSource = createMicroEventSource(appName, url, value)
+        },
+      },
+    })
+  }
+
+  /**
+   * Init scope keys to microAppWindow, prevent fall to rawWindow from with(microAppWindow)
+   * like: if (!xxx) {}
+   * NOTE:
+   * 1. Symbol.unscopables cannot affect undefined keys
+   * 2. Doesn't use for window.xxx because it fall to proxyWindow
+   */
+  setScopeProperties (microAppWindow: microAppWindowType): void {
+    this.scopeProperties.forEach((key: PropertyKey) => {
+      Reflect.set(microAppWindow, key, microAppWindow[key])
+    })
+  }
+
+  // set location & history for memory router
+  private setMicroAppRouter (microAppWindow: microAppWindowType, appName: string, url: string): void {
+    const { microLocation, microHistory } = createMicroRouter(appName, url)
+    rawDefineProperties(microAppWindow, {
+      location: {
+        configurable: false,
+        enumerable: true,
+        get () {
+          return microLocation
+        },
+        set: (value) => {
+          globalEnv.rawWindow.location = value
+        },
+      },
+      history: {
+        configurable: true,
+        enumerable: true,
+        get () {
+          return microHistory
+        },
+      },
+    })
+  }
+
+  private initRouteState (defaultPage: string): void {
+    initRouteStateWithURL(
+      this.proxyWindow.__MICRO_APP_NAME__,
+      this.proxyWindow.location as MicroLocation,
+      defaultPage,
+    )
+  }
+
+  private clearRouteState (keepRouteState: boolean): void {
+    clearRouteStateFromURL(
+      this.proxyWindow.__MICRO_APP_NAME__,
+      this.proxyWindow.__MICRO_APP_URL__,
+      this.proxyWindow.location as MicroLocation,
+      keepRouteState,
+    )
+  }
+
+  public setRouteInfoForKeepAliveApp (): void {
+    updateBrowserURLWithLocation(
+      this.proxyWindow.__MICRO_APP_NAME__,
+      this.proxyWindow.location as MicroLocation,
+    )
+  }
+
+  public removeRouteInfoForKeepAliveApp (): void {
+    removeStateAndPathFromBrowser(this.proxyWindow.__MICRO_APP_NAME__)
+  }
+
+  /**
+   * Create new document and Document
+   */
+  private createProxyDocument (appName: string) {
+    const rawDocument = globalEnv.rawDocument
+    const rawRootDocument = globalEnv.rawRootDocument
+
+    const createElement = function (tagName: string, options?: ElementCreationOptions): HTMLElement {
+      const element = globalEnv.rawCreateElement.call(rawDocument, tagName, options)
+      element.__MICRO_APP_NAME__ = appName
+      return element
+    }
+
+    const proxyDocument = new Proxy(rawDocument, {
+      get: (target: Document, key: PropertyKey): unknown => {
+        throttleDeferForSetAppName(appName)
+        throttleDeferForParentNode(proxyDocument)
+        if (key === 'createElement') return createElement
+        if (key === Symbol.toStringTag) return 'ProxyDocument'
+        if (key === 'defaultView') return this.proxyWindow
+        const rawValue = Reflect.get(target, key)
+        return isFunction(rawValue) ? bindFunctionToRawObject(rawDocument, rawValue, 'DOCUMENT') : rawValue
+      },
+      set: (target: Document, key: PropertyKey, value: unknown): boolean => {
+        /**
+         * 1. Fix TypeError: Illegal invocation when set document.title
+         * 2. If the set method returns false, and the assignment happened in strict-mode code, a TypeError will be thrown.
+         */
+        Reflect.set(target, key, value)
+        return true
+      }
+    })
+
+    class MicroDocument {
+      static [Symbol.hasInstance] (target: unknown) {
+        let proto = target
+        while (proto = Object.getPrototypeOf(proto)) {
+          if (proto === MicroDocument.prototype) {
+            return true
+          }
+        }
+        return (
+          target === proxyDocument ||
+          target instanceof rawRootDocument
+        )
+      }
+    }
+
+    /**
+     * TIP:
+     * 1. child class __proto__, which represents the inherit of the constructor, always points to the parent class
+     * 2. child class prototype.__proto__, which represents the inherit of methods, always points to parent class prototype
+     * e.g.
+     * class B extends A {}
+     * B.__proto__ === A // true
+     * B.prototype.__proto__ === A.prototype // true
+     */
+    Object.setPrototypeOf(MicroDocument, rawRootDocument)
+    // Object.create(rawRootDocument.prototype) will cause MicroDocument and proxyDocument methods not same when exec Document.prototype.xxx = xxx in child app
+    Object.setPrototypeOf(MicroDocument.prototype, new Proxy(rawRootDocument.prototype, {
+      get (target: Document, key: PropertyKey): unknown {
+        throttleDeferForSetAppName(appName)
+        const rawValue = Reflect.get(target, key)
+        return isFunction(rawValue) ? bindFunctionToRawObject(rawDocument, rawValue, 'DOCUMENT') : rawValue
+      },
+      set (target: Document, key: PropertyKey, value: unknown): boolean {
+        Reflect.set(target, key, value)
+        return true
+      }
+    }))
+
+    return {
+      proxyDocument,
+      MicroDocument,
+    }
   }
 }
